@@ -2,9 +2,11 @@ package io.antmedia.plugin;
 
 import static org.bytedeco.ffmpeg.global.avcodec.AV_PKT_FLAG_KEY;
 import static org.bytedeco.ffmpeg.global.avcodec.av_init_packet;
+import static org.bytedeco.ffmpeg.global.avcodec.av_packet_free;
 import static org.bytedeco.ffmpeg.global.avcodec.av_packet_unref;
 import static org.bytedeco.ffmpeg.global.avutil.AVMEDIA_TYPE_AUDIO;
 import static org.bytedeco.ffmpeg.global.avutil.AVMEDIA_TYPE_VIDEO;
+import static org.bytedeco.ffmpeg.global.avutil.AVMEDIA_TYPE_DATA;
 
 import java.nio.ByteBuffer;
 import java.util.Queue;
@@ -17,12 +19,13 @@ import org.bytedeco.javacpp.BytePointer;
 import io.antmedia.muxer.Muxer.VideoBuffer;
 import io.antmedia.plugin.api.IPacketListener;
 
-public class PacketFeeder{
+public class PacketFeeder implements AutoCloseable {
 
 	private Queue<IPacketListener> listeners = new ConcurrentLinkedQueue<>();
 	private String streamId;
 	private AVPacket videoPkt;
 	private AVPacket audioPkt;
+	private boolean closed;
 
 
 	public PacketFeeder(String streamId) {
@@ -48,11 +51,14 @@ public class PacketFeeder{
 			else if(type == AVMEDIA_TYPE_AUDIO) {
 				listener.onAudioPacket(streamId, packet);
 			}
+			else if(type == AVMEDIA_TYPE_DATA) {
+				listener.onDataPacket(streamId, packet);
+			}
 		}
 	}
 
 	public boolean addListener(IPacketListener listener) {
-		return listeners.add(listener);
+		return !closed && listeners.add(listener);
 	}
 
 	public boolean removeListener(IPacketListener listener) {
@@ -86,9 +92,6 @@ public class PacketFeeder{
 	 * @param isKeyFrame
 	 * @param firstFrameTimeStamp
 	 * @param pts
-	 * @param frameOriginalTimeMs may be different than pts and dts because pts and dts may be normalized value according to audio to protect audio-synch issues
-	 *  in WebRTC Ingesting. 
-	 * On the other hand, we may need original value in WebRTC this is why we add this parameter
 	 */
 	public void writeVideoBuffer(ByteBuffer encodedVideoFrame, long dts, int frameRotation, int streamIndex,
 			boolean isKeyFrame,long firstFrameTimeStamp, long pts) {
@@ -122,5 +125,27 @@ public class PacketFeeder{
 
 			av_packet_unref(videoPkt);
 		}
+	}
+
+	@Override
+	public synchronized void close() {
+		if (closed) {
+			return;
+		}
+		closed = true;
+		listeners.clear();
+
+		if (audioPkt != null) {
+			av_packet_free(audioPkt);
+			audioPkt = null;
+		}
+		if (videoPkt != null) {
+			av_packet_free(videoPkt);
+			videoPkt = null;
+		}
+	}
+
+	boolean isClosed() {
+		return closed;
 	}
 }

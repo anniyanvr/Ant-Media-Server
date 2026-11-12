@@ -1,8 +1,14 @@
 package io.antmedia.test.filter;
 
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.fail;
+
+import org.junit.jupiter.api.Tag;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -22,10 +28,10 @@ import jakarta.servlet.http.HttpSession;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.rules.TestRule;
 import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
@@ -37,6 +43,7 @@ import org.springframework.web.context.ConfigurableWebApplicationContext;
 import org.springframework.web.context.WebApplicationContext;
 
 import io.antmedia.AntMediaApplicationAdapter;
+import io.antmedia.AppSettings;
 import io.antmedia.datastore.db.DataStore;
 import io.antmedia.datastore.db.DataStoreFactory;
 import io.antmedia.datastore.db.types.Broadcast;
@@ -44,6 +51,7 @@ import io.antmedia.filter.DashStatisticsFilter;
 import io.antmedia.statistic.DashViewerStats;
 import io.antmedia.statistic.IStreamStats;
 
+@Tag("fast")
 public class DashStatisticsFilterTest {
 	
 	private DashStatisticsFilter dashStatisticsFilter;
@@ -51,12 +59,12 @@ public class DashStatisticsFilterTest {
 	protected static Logger logger = LoggerFactory.getLogger(DashStatisticsFilterTest.class);
 
 
-	@Before
+	@BeforeEach
 	public void before() {
 		dashStatisticsFilter = new DashStatisticsFilter();
 	}
 	
-	@After
+	@AfterEach
 	public void after() {
 		dashStatisticsFilter = null;
 	}
@@ -92,6 +100,9 @@ public class DashStatisticsFilterTest {
 		assertNull(dashStatisticsFilter.getStreamStats(DashViewerStats.BEAN_NAME));
 		
 		
+		AppSettings appSettings = new AppSettings();
+		when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(appSettings);
+
 		
 		HttpServletRequest mockRequest = mock(HttpServletRequest.class);
 		HttpServletResponse mockResponse = mock(HttpServletResponse.class);
@@ -190,12 +201,17 @@ public class DashStatisticsFilterTest {
 			DataStoreFactory dsf = mock(DataStoreFactory.class);		
 			when(context.getBean(DataStoreFactory.BEAN_NAME)).thenReturn(dsf);
 			
+			AppSettings appSettings = new AppSettings();
+			when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(appSettings);
+
+			
 			DataStore dataStore = mock(DataStore.class);
 			when(dataStore.isAvailable()).thenReturn(true);
 			when(dsf.getDataStore()).thenReturn(dataStore);
 			
 			AntMediaApplicationAdapter appAdaptor = Mockito.mock(AntMediaApplicationAdapter.class);
 			doReturn(appAdaptor).when(dashStatisticsFilterSpy).getAntMediaApplicationAdapter();
+			
 			
 
 			logger.info("session id {}, stream id {}", sessionId, streamId);
@@ -307,6 +323,10 @@ public class DashStatisticsFilterTest {
 			DataStoreFactory dsf = mock(DataStoreFactory.class);		
 			when(context.getBean(DataStoreFactory.BEAN_NAME)).thenReturn(dsf);
 			
+			AppSettings appSettings = new AppSettings();
+			when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(appSettings);
+
+			
 			DataStore dataStore = mock(DataStore.class);
 			when(dataStore.isAvailable()).thenReturn(true);
 			when(dsf.getDataStore()).thenReturn(dataStore);
@@ -315,7 +335,7 @@ public class DashStatisticsFilterTest {
 			dashStatisticsFilter.doFilter(mockRequest, mockResponse, mockChain);
 			
 			
-			verify(streamStats, times(1)).registerNewViewer(streamId, sessionId, null);
+			verify(streamStats, times(1)).registerNewViewer(eq(streamId), anyString(), isNull());
 			
 			
 			
@@ -347,6 +367,10 @@ public class DashStatisticsFilterTest {
 		DataStoreFactory dsf = mock(DataStoreFactory.class);		
 		when(context.getBean(DataStoreFactory.BEAN_NAME)).thenReturn(dsf);
 		
+		AppSettings appSettings = new AppSettings();
+		when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(appSettings);
+
+		
 		when(servletContext.getAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE))
 				.thenReturn(context);
 		
@@ -365,16 +389,16 @@ public class DashStatisticsFilterTest {
 			dashStatisticsFilter.init(filterconfig);
 			//when(dashStatisticsFilter.getStreamStats()).thenReturn(streamStats);
 			
-			String sessionId = requestDash(streamId);		
-			verify(streamStats, times(1)).registerNewViewer(streamId, sessionId, null);
+			requestDash(streamId);		
+			verify(streamStats, times(1)).registerNewViewer(eq(streamId), anyString(), isNull());
 			broadcast.setDashViewerCount(1);
 			
-			String sessionId2 = requestDash(streamId);		
-			verify(streamStats, times(1)).registerNewViewer(streamId, sessionId2, null);
+			requestDash(streamId);		
+			verify(streamStats, times(2)).registerNewViewer(eq(streamId), anyString(), isNull());
 			broadcast.setDashViewerCount(2);
 
-			String sessionId3 = requestDash(streamId);		
-			verify(streamStats, never()).registerNewViewer(streamId, sessionId3, null);
+			requestDash(streamId);		
+			verify(streamStats, times(2)).registerNewViewer(eq(streamId), anyString(), isNull());
 		} catch (ServletException|IOException e) {
 			logger.error(ExceptionUtils.getStackTrace(e));
 			fail(ExceptionUtils.getStackTrace(e));

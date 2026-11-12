@@ -1,8 +1,11 @@
 package io.antmedia.test.token;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.fail;
+
+import org.junit.jupiter.api.Tag;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.fail;
+
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -21,10 +24,10 @@ import jakarta.servlet.http.HttpSession;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.rules.TestRule;
 import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
@@ -43,17 +46,18 @@ import io.antmedia.security.ITokenService;
 import io.antmedia.security.MockTokenService;
 
 
+@Tag("fast")
 public class TokenFilterTest {
 	protected static Logger logger = LoggerFactory.getLogger(TokenFilterTest.class);
 
 	private TokenFilterManager tokenFilter;
 
-	@Before
+	@BeforeEach
 	public void before() {
 		tokenFilter = new TokenFilterManager();
 	}
 
-	@After
+	@AfterEach
 	public void after() {
 		tokenFilter = null;
 	}
@@ -380,7 +384,7 @@ public class TokenFilterTest {
 		ITokenService tokenService = mock(ITokenService.class);
 		AppSettings settings = new AppSettings();
 		settings.resetDefaults();
-		settings.setTimeTokenSubscriberOnly(true);
+		settings.setEnableTimeTokenForPlay(true);
 
 		
 		when(context.getBean("token.service")).thenReturn(tokenService);
@@ -437,6 +441,8 @@ public class TokenFilterTest {
 
 	@Test
 	public void testGetStreamId() {
+		
+		assertNull(TokenFilterManager.getStreamId(null));
 		String streamId = "stream_Id";
 		
 		assertEquals("test_stream_Id_davut_diyen_kedi", TokenFilterManager.getStreamId("/liveapp/streams/"+"test_"+streamId+"_davut_diyen_kedi_adaptive.m3u8"));
@@ -482,10 +488,12 @@ public class TokenFilterTest {
 		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/subfolder/"+streamId+"_1"+".mp4")); 
 
 		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/"+streamId+".mp4")); 
-		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/subfolder/"+streamId+".mp4")); 
-		
-		
-		assertEquals(streamId+ "_underline_test", TokenFilterManager.getStreamId("/liveapp/streams/"+streamId+ "_underline_test-2021-05-18_11-26-26.842"+".mp4")); 
+		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/subfolder/"+streamId+".mp4"));
+
+        assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/"+streamId+".mp3"));
+        assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/subfolder/"+streamId+".mp3"));
+
+        assertEquals(streamId+ "_underline_test", TokenFilterManager.getStreamId("/liveapp/streams/"+streamId+ "_underline_test-2021-05-18_11-26-26.842"+".mp4"));
 		assertEquals(streamId+ "_underline_test", TokenFilterManager.getStreamId("/liveapp/streams/subfolder/"+streamId+ "_underline_test-2021-05-18_11-26-26.842"+".mp4")); 
 		
 		
@@ -591,7 +599,7 @@ public class TokenFilterTest {
 		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/subfolder/"+streamId+"_240p500kbps.mp4"));
 		
 		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/"+streamId+"_240p500kbps.webm"));
-		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/subfolder/"+streamId+"_240p500kbps.webm"));
+		assertEquals(streamId, TokenFilterManager.getStreamId("/live)app/streams/subfolder/"+streamId+"_240p500kbps.webm"));
 		
 		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/"+streamId+"_240p500kbps_1.webm"));
 		assertEquals(streamId, TokenFilterManager.getStreamId("/liveapp/streams/subfolder/"+streamId+"_240p500kbps_1.webm"));
@@ -614,7 +622,68 @@ public class TokenFilterTest {
 		
 		requestURI = "/LiveApp/streams/subfolder/"+ streamId + ".m3u8"; 
 		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI));
-				
+		
+		
+		requestURI = "/LiveApp/streams/subfolder/"+ streamId + ".m3u8"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI));
+		
+		requestURI = "/LiveApp/streams/subfolder/ll-hls/"+ streamId + ".m3u8"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI));
+		
+		requestURI = "/LiveApp/streams/subfolder/ll-hls/"+ streamId + "__lowlatency.m3u8"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI));
+		
+		requestURI = "/LiveApp/streams/subfolder/ll-hls/"+streamId + "/"+ streamId + "__lowlatency.m3u8"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI));
+		
+		requestURI = "/LiveApp/streams/subfolder/ll-hls/"+streamId + "/"+ streamId + "__anything.m3u8"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI));
+		
+		requestURI = "/LiveApp/streams/subfolder/ll-hls/"+streamId + "/"+ streamId + "__anything.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI));
+		
+		requestURI = "/LiveApp/streams/subfolder/ll-hls/"+streamId + "/"+ streamId + "_anything.ts"; 
+		assertNull(TokenFilterManager.getStreamId(requestURI));
+
+		requestURI = "/streams/streamId_oG1q04IqJ__720p2000kbps.m3u8";
+		String result = TokenFilterManager.getStreamId(requestURI);
+		assertEquals("streamId_oG1q04IqJ_", result);
+
+		requestURI = "/streams/streamId_QBmxJHmjO__720p2000kbps000000266.ts";
+		result = TokenFilterManager.getStreamId(requestURI);
+		assertEquals("streamId_QBmxJHmjO_", result);
+		//parse with suffix
+		requestURI = "/LiveApp/streams/"+streamId + "_240p300kbps-20250310-1741579422.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "-%Y%m%d-%s"));
+		
+		requestURI = "/LiveApp/streams/"+streamId + "_240p300kbpsx20250310#1741579422.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "x%Y%m%d#%s"));
+		
+		requestURI = "/LiveApp/streams/"+streamId + "_240p300kbps-0310-1741579422.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "-%m%d-%s"));
+		
+		requestURI = "/LiveApp/streams/"+streamId + "_240p300kbps-10-1741579422.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "-%d-%s"));
+		
+		requestURI = "/LiveApp/streams/"+streamId + "_240p300kbps-1741579422.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "-%s"));
+		
+		requestURI = "/LiveApp/streams/"+streamId + "_240p300kbps1741579422.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "%s"));
+		
+		requestURI = "/LiveApp/streams/"+streamId + "_240p300kbps000000003.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "%9d"));
+		
+		requestURI = "/LiveApp/streams/"+streamId + "-1741579422.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "-%s"));
+		
+		streamId = "f6867e64-c9a1-a7dd-1d14-6b4312c8c8ee";
+		requestURI = "/LiveApp/streams/"+streamId + "-1741579422.ts"; 
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "-%s"));
+
+		streamId = "f6867e64-c9a1-a7dd-1d14-6b4312c8c999";
+		requestURI = "/LiveApp/streams/ll-hls/"+streamId+"/"+streamId+"__master.m3u8";
+		assertEquals(streamId, TokenFilterManager.getStreamId(requestURI, "-%s"));
 	}
 	
 

@@ -5,7 +5,8 @@ import static org.bytedeco.cuda.global.nvml.nvmlDeviceGetCount_v2;
 import static org.bytedeco.cuda.global.nvml.nvmlDeviceGetHandleByIndex_v2;
 import static org.bytedeco.cuda.global.nvml.nvmlDeviceGetMemoryInfo;
 import static org.bytedeco.cuda.global.nvml.nvmlDeviceGetName;
-import static org.bytedeco.cuda.global.nvml.nvmlDeviceGetUtilizationRates;
+import static org.bytedeco.cuda.global.nvml.*;
+
 import static org.bytedeco.cuda.global.nvml.nvmlInit_v2;
 
 import org.bytedeco.cuda.global.nvml;
@@ -16,6 +17,8 @@ import org.bytedeco.javacpp.IntPointer;
 import org.bytedeco.javacpp.Loader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 public class GPUUtils {
 
@@ -66,7 +69,7 @@ public class GPUUtils {
 				Loader.load(nvml.class);
 				int result = nvmlInit_v2();
 				if (result == NVML_SUCCESS) {
-					logger.info("cuda initialized {}", "");
+					logger.info("cuda initialized");
 					noGPU = false;
 				}
 				else {
@@ -123,8 +126,9 @@ public class GPUUtils {
 		}
 		return null;
 	} 
+	
 
-
+    @Nullable
 	public MemoryStatus getMemoryStatus(int deviceNo) {
 		nvmlDevice_st device = null;
 		if ((device = getDevice(deviceNo)) != null) {
@@ -135,6 +139,46 @@ public class GPUUtils {
 		}
 		return null;
 	}
+	
+	/**
+	 * Get the encoder utilization of the device
+	 * @param deviceNo
+	 * @return encoder utilization by percentage
+	 */
+	public int getEncoderUtilization(int deviceNo) {
+		nvmlDevice_st device = null;
+		if ((device = getDevice(deviceNo)) != null) 
+		{	
+			 int[] encoderUtilization = new int[1];
+	         int[] samplingPeriod = new int[1];
+			
+			if (nvmlDeviceGetEncoderUtilization(device, encoderUtilization, samplingPeriod) == NVML_SUCCESS) {
+				return encoderUtilization[0];
+			}
+		}
+		return -1;	
+	}
+	
+	/**
+	 * Get the decoder utilization of the device
+	 * @param deviceNo
+	 * @return decoder utilization by percentage
+	 */
+	public int getDecoderUtilization(int deviceNo) {
+		nvmlDevice_st device = null;
+		if ((device = getDevice(deviceNo)) != null) 
+		{	
+			 int[] decoderUtilization = new int[1];
+	         int[] samplingPeriod = new int[1];
+			
+			if (nvmlDeviceGetDecoderUtilization(device, decoderUtilization, samplingPeriod) == NVML_SUCCESS) {
+				return decoderUtilization[0];
+			}
+		}
+		return -1;	
+	}
+	
+	
 	
 	public String getDeviceName(int deviceIndex) {
 		nvmlDevice_st device = null;

@@ -1,12 +1,15 @@
 package io.antmedia.test.statistic;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.Tag;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.red5.server.api.scope.IScope;
 
@@ -34,19 +37,53 @@ import io.antmedia.statistic.ViewerStats;
 import io.vertx.core.Vertx;
 
 
+@Tag("fast")
 public class HlsViewerStatsTest {
 	
 	static Vertx vertx;	
 	
 	
-	@BeforeClass
+	@BeforeAll
 	public static void beforeClass() {
 		vertx = io.vertx.core.Vertx.vertx();
 	}
 	
-	@AfterClass
+	@AfterAll
 	public static void afterClass() {
 		vertx.close();
+	}
+	
+	@Test
+	public void testUpdateSubscriberIfRequires() {
+		HlsViewerStats viewerStats = new HlsViewerStats();
+		
+		viewerStats.setVertx(vertx);
+		DataStore dataStore = Mockito.spy(new InMemoryDataStore("datastore"));
+		viewerStats.setDataStore(dataStore);
+		viewerStats.setServerSettings(new ServerSettings());
+		
+		String streamId = String.valueOf((Math.random() * 999999));
+
+		Broadcast broadcast = new Broadcast();
+
+		try {
+			broadcast.setStreamId(streamId);
+		} catch (Exception e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}	
+		
+		String subscriberId = "subscriberId";
+		String sessionId = String.valueOf((Math.random() * 999999));
+		viewerStats.registerNewViewer(streamId, sessionId, subscriberId);
+		Mockito.verify(dataStore, timeout(2000)).addSubscriber(any(), any());
+		
+		viewerStats.registerNewViewer(streamId, sessionId, subscriberId);
+		Mockito.verify(dataStore,  after(2000).times(1)).addSubscriber(any(), any());
+
+		
+		
+		
 	}
 
 	@Test
@@ -102,6 +139,11 @@ public class HlsViewerStatsTest {
 		viewerStats.setVertx(vertx);
 
 		DataStore dataStore = new InMemoryDataStore("datastore");
+		AppSettings appSettings = new AppSettings();
+		appSettings.setWriteSubscriberEventsToDatastore(true);
+		
+		dataStore.setAppSettings(appSettings);
+
 		viewerStats.setDataStore(dataStore);
 		
 		String streamId = "stream1";
@@ -127,7 +169,7 @@ public class HlsViewerStatsTest {
 				boolean eventExist = false;
 				Subscriber subData = dataStore.getSubscriber(streamId, subscriberPlay.getSubscriberId());
 				
-				List<ConnectionEvent> events = subData.getStats().getConnectionEvents();
+				List<ConnectionEvent> events = dataStore.getConnectionEvents(streamId, subscriberPlay.getSubscriberId(), 0, 50);
 				
 				if(events.size() == 1) {
 					ConnectionEvent event2 = events.get(0);
@@ -143,6 +185,31 @@ public class HlsViewerStatsTest {
 		
 	}
 	
+	@Test
+	public void testMigrateViewerEntry() {
+		HlsViewerStats viewerStats = new HlsViewerStats();
+		viewerStats.setVertx(vertx);
+		viewerStats.setDataStore(new InMemoryDataStore("datastore"));
+		viewerStats.setServerSettings(new ServerSettings());
+
+		String streamId = String.valueOf((Math.random() * 999999));
+		String subscriberId = "subscriber1";
+
+		viewerStats.registerNewViewer(streamId, "fingerprint", subscriberId);
+		Awaitility.await().atMost(10, TimeUnit.SECONDS).until(
+				() -> viewerStats.getSessionId2subscriberId().containsKey("fingerprint"));
+
+		//same client coming back with its cookie, it must not be counted a second time
+		viewerStats.migrateViewerEntry(streamId, "fingerprint", "viewerId");
+		viewerStats.registerNewViewer(streamId, "viewerId", subscriberId);
+		Awaitility.await().atMost(10, TimeUnit.SECONDS).until(
+				() -> viewerStats.getSessionId2subscriberId().containsKey("viewerId"));
+
+		assertEquals(1, viewerStats.getViewerCount(streamId));
+		assertEquals(1, viewerStats.getIncreaseCounterMap(streamId));
+		assertFalse(viewerStats.getSessionId2subscriberId().containsKey("fingerprint"));
+	}
+
 	@Test
 	public void testGetTimeout() {
 		AppSettings settings = mock(AppSettings.class);
@@ -176,6 +243,7 @@ public class HlsViewerStatsTest {
 
 			//set hls time to 1
 			settings.setHlsTime("1");
+			settings.setWriteSubscriberEventsToDatastore(true);
 			
 			when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(settings);
 			when(context.getBean(ServerSettings.BEAN_NAME)).thenReturn(new ServerSettings());
@@ -246,7 +314,7 @@ public class HlsViewerStatsTest {
 					boolean eventExist = false;
 					Subscriber subData = dsf.getDataStore().getSubscriber(streamId, subscriberPlay.getSubscriberId());
 					
-					List<ConnectionEvent> events = subData.getStats().getConnectionEvents();
+					List<ConnectionEvent> events =  dsf.getDataStore().getConnectionEvents(streamId, subscriberPlay.getSubscriberId(), 0, 50);
 					
 					if(events.size() == 1) {
 						ConnectionEvent event = events.get(0);
@@ -271,7 +339,7 @@ public class HlsViewerStatsTest {
 			// a disconnection event should be added 
 			Subscriber subData = dsf.getDataStore().getSubscriber(streamId, subscriberPlay2.getSubscriberId());
 			
-			List<ConnectionEvent> events = subData.getStats().getConnectionEvents();
+			List<ConnectionEvent> events =  dsf.getDataStore().getConnectionEvents(streamId, subscriberPlay2.getSubscriberId(), 0, 50);
 			
 			assertEquals(2, events.size());
 			ConnectionEvent eventDis = events.get(1);
@@ -313,7 +381,7 @@ public class HlsViewerStatsTest {
 			
 			Subscriber subData2 = dsf.getDataStore().getSubscriber(streamId, subscriberPlay3.getSubscriberId());
 			
-			List<ConnectionEvent> events2 = subData2.getStats().getConnectionEvents();
+			List<ConnectionEvent> events2 =  dsf.getDataStore().getConnectionEvents(streamId, subscriberPlay3.getSubscriberId(), 0, 50);
 			
 			assertEquals(2, events2.size());
 			ConnectionEvent eventDis2 = events.get(1);

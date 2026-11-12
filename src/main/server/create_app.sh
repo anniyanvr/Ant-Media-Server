@@ -6,7 +6,7 @@ usage() {
   echo "Usage:"
   echo "$0 -n APPLICATION_NAME [-p INSTALLATION_PATH] [-w true|false] [-c true|false]"
   echo "Options:"
-  echo "-n: Name of the application that you want to have. It's mandatory"
+  echo "-n: Name of the application that you want to have. It's mandatory. Make sure there is no application with the same name"
   echo "-m: Database URI including username and password. It can be MongoDB or RedisDB connection url. If it's a cluster, it's mandatory. Otherwise optional"
   echo "-f: war file path for custom app deployment"
   echo "-p: (Optional) Path is the install location of Ant Media Server which is /usr/local/antmedia by default."
@@ -18,7 +18,10 @@ usage() {
  
   echo " "
   echo "Example: "
-  echo "$0 -n live -w"
+  echo "Deploy as a directory" 
+  echo "$0 -n live "
+  echo "Deploy as war file"
+  echo "$0 -n live -w false "
   echo " "
   echo "If you have any question, send e-mail to contact@antmedia.io"
 }
@@ -119,7 +122,7 @@ sed -i $SED_COMPATIBILITY 's^webapp.dbName=.*^webapp.dbName='$APP_NAME_LOWER'.db
 check_result
 sed -i $SED_COMPATIBILITY 's^webapp.contextPath=.*^webapp.contextPath=/'$APP_NAME'^' $RED5_PROPERTIES_FILE
 check_result
-sed -i $SED_COMPATIBILITY 's^db.app.name=.*^db.app.name='$APP_NAME'^' $RED5_PROPERTIES_FILE
+sed -i $SED_COMPATIBILITY 's^appName=.*^appName='$APP_NAME'^' $RED5_PROPERTIES_FILE
 check_result
 sed -i $SED_COMPATIBILITY 's^db.name=.*^db.name='$APP_NAME_LOWER'^' $RED5_PROPERTIES_FILE
 check_result
@@ -146,15 +149,27 @@ elif [[ $DB_HOST =~ ^redis.*$ ]]; then
 fi
 
 
+# Escape characters that are special in the replacement part of a sed 's' command.
+# In the replacement, '&' expands to the whole match and '\' starts an escape, so a
+# DB URI like "...?replicaSet=x&authSource=y" would be corrupted. We also escape the
+# delimiter used on each line ('/' or '#') in case a value (e.g. a password) contains it.
+escape_sed_replacement() {
+  # $1: value to escape, $2: delimiter character used in the sed command
+  printf '%s' "$1" | sed -e 's/[\\&'"$2"']/\\&/g'
+}
+
+DB_HOST_ESC=$(escape_sed_replacement "$DB_HOST" '#')
+DB_USER_ESC=$(escape_sed_replacement "$DB_USER" '/')
+DB_PASS_ESC=$(escape_sed_replacement "$DB_PASS" '/')
+
 sed -i $SED_COMPATIBILITY 's/db.type=.*/db.type='$DB_TYPE'/' $RED5_PROPERTIES_FILE
-sed -i $SED_COMPATIBILITY 's#db.host=.*#db.host='$DB_HOST'#' $RED5_PROPERTIES_FILE  
-sed -i $SED_COMPATIBILITY 's/db.user=.*/db.user='$DB_USER'/' $RED5_PROPERTIES_FILE
-sed -i $SED_COMPATIBILITY 's/db.password=.*/db.password='$DB_PASS'/' $RED5_PROPERTIES_FILE
+sed -i $SED_COMPATIBILITY "s#db.host=.*#db.host=$DB_HOST_ESC#" $RED5_PROPERTIES_FILE
+sed -i $SED_COMPATIBILITY "s/db.user=.*/db.user=$DB_USER_ESC/" $RED5_PROPERTIES_FILE
+sed -i $SED_COMPATIBILITY "s/db.password=.*/db.password=$DB_PASS_ESC/" $RED5_PROPERTIES_FILE
     
 
 if [[ "$IS_CLUSTER" == "true" ]]; then
     echo "Cluster mode"
-    ln -s $WAR_FILE $AMS_DIR/webapps/root/$APP_NAME.war
 else 
     echo "Not cluster mode."    
 fi

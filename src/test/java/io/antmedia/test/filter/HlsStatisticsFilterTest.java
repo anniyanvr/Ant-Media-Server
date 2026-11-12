@@ -1,6 +1,14 @@
 package io.antmedia.test.filter;
 
-import static org.junit.Assert.*;
+import org.junit.jupiter.api.Tag;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+
 import static org.mockito.Mockito.*;
 
 import java.io.IOException;
@@ -15,10 +23,10 @@ import jakarta.servlet.http.HttpSession;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.rules.TestRule;
 import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
@@ -28,6 +36,7 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.web.context.ConfigurableWebApplicationContext;
 import org.springframework.web.context.WebApplicationContext;
 
+import io.antmedia.AppSettings;
 import io.antmedia.datastore.db.DataStore;
 import io.antmedia.datastore.db.DataStoreFactory;
 import io.antmedia.datastore.db.types.Broadcast;
@@ -35,6 +44,7 @@ import io.antmedia.filter.HlsStatisticsFilter;
 import io.antmedia.statistic.HlsViewerStats;
 import io.antmedia.statistic.IStreamStats;
 
+@Tag("fast")
 public class HlsStatisticsFilterTest {
 	
 	private HlsStatisticsFilter hlsStatisticsFilter;
@@ -42,12 +52,12 @@ public class HlsStatisticsFilterTest {
 	protected static Logger logger = LoggerFactory.getLogger(HlsStatisticsFilterTest.class);
 
 
-	@Before
+	@BeforeEach
 	public void before() {
 		hlsStatisticsFilter = new HlsStatisticsFilter();
 	}
 	
-	@After
+	@AfterEach
 	public void after() {
 		hlsStatisticsFilter = null;
 	}
@@ -148,6 +158,9 @@ public class HlsStatisticsFilterTest {
 			DataStoreFactory dsf = mock(DataStoreFactory.class);		
 			when(context.getBean(DataStoreFactory.BEAN_NAME)).thenReturn(dsf);
 			
+			AppSettings appSettings = new AppSettings();
+			when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(appSettings);
+			
 			DataStore dataStore = mock(DataStore.class);
 			when(dataStore.isAvailable()).thenReturn(true);
 			when(dsf.getDataStore()).thenReturn(dataStore);
@@ -156,7 +169,7 @@ public class HlsStatisticsFilterTest {
 			hlsStatisticsFilter.doFilter(mockRequest, mockResponse, mockChain);
 			
 			
-			verify(streamStats, times(1)).registerNewViewer(streamId, sessionId, null);
+			verify(streamStats, times(1)).registerNewViewer(eq(streamId), anyString(), isNull());
 			
 			
 			
@@ -187,6 +200,9 @@ public class HlsStatisticsFilterTest {
 		DataStoreFactory dsf = mock(DataStoreFactory.class);		
 		when(context.getBean(DataStoreFactory.BEAN_NAME)).thenReturn(dsf);
 		
+		AppSettings appSettings = new AppSettings();
+		when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(appSettings);
+		
 		when(servletContext.getAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE))
 				.thenReturn(context);
 		
@@ -204,16 +220,16 @@ public class HlsStatisticsFilterTest {
 		try {
 			hlsStatisticsFilter.init(filterconfig);
 			
-			String sessionId = requestHls(streamId);		
-			verify(streamStats, times(1)).registerNewViewer(streamId, sessionId, null);
+			requestHls(streamId);		
+			verify(streamStats, times(1)).registerNewViewer(eq(streamId), anyString(), isNull());
 			broadcast.setHlsViewerCount(1);
 			
-			String sessionId2 = requestHls(streamId);		
-			verify(streamStats, times(1)).registerNewViewer(streamId, sessionId2, null);
+			requestHls(streamId);		
+			verify(streamStats, times(2)).registerNewViewer(eq(streamId), anyString(), isNull());
 			broadcast.setHlsViewerCount(2);
 
-			String sessionId3 = requestHls(streamId);		
-			verify(streamStats, never()).registerNewViewer(streamId, sessionId3, null);
+			requestHls(streamId);		
+			verify(streamStats, times(2)).registerNewViewer(eq(streamId), anyString(), isNull());
 		} catch (ServletException|IOException e) {
 			logger.error(ExceptionUtils.getStackTrace(e));
 			fail(ExceptionUtils.getStackTrace(e));

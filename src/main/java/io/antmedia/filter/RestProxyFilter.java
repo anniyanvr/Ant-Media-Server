@@ -91,18 +91,16 @@ public class RestProxyFilter extends AbstractFilter {
 						logger.error(e.getMessage());
 					}
 				}
-
+				
 				/** 
 				 * if broadcast is not null and it's streaming and this node is not destined for this node,
 				 * forward the request to the origin address. This also handles the scenario if the origin server is dead or broadcast stuck
 				 * because AntMediaApplicationAdapter.isStreaming checks the last update time
 				 */
-				else if (broadcast != null && AntMediaApplicationAdapter.isStreaming(broadcast)
+				else if (broadcast != null && AntMediaApplicationAdapter.isStreaming(broadcast.getStatus())
 						&& !isRequestDestinedForThisNode(request.getRemoteAddr(), broadcast.getOriginAdress())
 						&& isHostRunning(broadcast.getOriginAdress(), getServerSettings().getDefaultHttpPort())) 
 				{
-
-
 					forwardRequestToNode(request, response, broadcast.getOriginAdress());
 				}
 				else 
@@ -127,6 +125,11 @@ public class RestProxyFilter extends AbstractFilter {
 				}
 
 			}
+			else 
+			{
+				//This means that this request should be handled in this node so let chain.doFilter
+				chain.doFilter(request, response);
+			}
 		}
 		else 
 		{
@@ -136,16 +139,20 @@ public class RestProxyFilter extends AbstractFilter {
 
 
 	public boolean isHostRunning(String address, int port) {
-
-		try(Socket socket = new Socket()) {
-			
-			SocketAddress sockaddr = new InetSocketAddress(address, port);
-			socket.connect(sockaddr, 5000);
+		boolean result = false;
+		if (StringUtils.isNotBlank(address)) 
+		{
+			try(Socket socket = new Socket()) {
+				
+				SocketAddress sockaddr = new InetSocketAddress(address, port);
+				socket.connect(sockaddr, 5000);
+				result = true;
+			}
+			catch (Exception e) {
+				logger.info("Cannot connect to the host: {} port: {} because of exception: {}", address, port, e.getMessage());
+			}
 		}
-		catch (NumberFormatException | IOException e) {
-			return false;
-		}
-		return true;
+		return result;
 	}
 
 
@@ -245,7 +252,9 @@ public class RestProxyFilter extends AbstractFilter {
 	/**
 	 * This method checks if there is a token in the header for internal node communication and if it exists, checks its validity
 	 * 
-	 * @param httpRequest
+	 * @param jwtInternalCommunicationToken
+	 * @param jwtSecretKey
+	 * @param requestURI
 	 * @return true if there is a token and it's valid. Otherwise it returns false.
 	 * 
 	 */
@@ -256,10 +265,10 @@ public class RestProxyFilter extends AbstractFilter {
 		{
 			result = JWTFilter.isJWTTokenValid(jwtSecretKey, jwtInternalCommunicationToken);
 			if(result) {
-				logger.info("Request forwarded:{} by another node is validated successfully", requestURI);
+				logger.info("Request received:{} by another node is validated successfully", requestURI);
 			}
 			else {
-				logger.warn("Requested forwarded:{} by another node is failed because cluster jwt token is valid", requestURI);
+				logger.warn("Requested received:{} by another node is failed because cluster jwt token is valid", requestURI);
 			}
 		}
 		else {

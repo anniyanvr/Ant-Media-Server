@@ -1,13 +1,20 @@
 package io.antmedia;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
 
 import javax.management.MBeanServer;
 
+import org.apache.commons.lang3.StringUtils;
 import org.bytedeco.javacpp.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -62,32 +69,30 @@ import com.sun.management.UnixOperatingSystemMXBean;
 public class SystemUtils {
 
 	public static final String HEAPDUMP_HPROF = "heapdump.hprof";
+	public static final long MAX_CONTAINER_MEMORY_LIMIT_BYTES = 109951162777600L; //100TB
+	public static final String MAX_MEMORY_CGROUP_V2 = "max";
 
 	/**
 	 * Obtain Operating System's name.
 	 * 
-	 * @return OS's name
 	 */
 	public static final String osName = System.getProperty("os.name");
 
 	/**
 	 * Obtain Operating System's Architecture.
 	 * 
-	 * @return x86 (32-bit), x64 (64-bit), ...
 	 */
 	public static final String osArch = System.getProperty("os.arch");
 
 	/**
 	 * Obtain Java JRE version.
 	 * 
-	 * @return version
 	 */
 	public static final String jvmVersion = System.getProperty("java.specification.version");
 
 	/**
 	 * Obtain Operating System's processor.
 	 * 
-	 * @return Number of Processor(s)
 	 */
 	public static final int osProcessorX = Runtime.getRuntime().availableProcessors();
 
@@ -104,6 +109,8 @@ public class SystemUtils {
 	public static final int WINDOWS = 2;
 	
 	public static final int OS_TYPE;
+
+	public static Boolean containerized = null;
 	
 	static {
 		String osName = SystemUtils.osName.toLowerCase();
@@ -134,10 +141,6 @@ public class SystemUtils {
 	/**
 	 * Obtain JVM's Maximum Memory.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -158,10 +161,6 @@ public class SystemUtils {
 	/**
 	 * Obtain JVM's Free Memory.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -172,10 +171,6 @@ public class SystemUtils {
 	/**
 	 * Obtain JVM's In Use Memory.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -199,10 +194,6 @@ public class SystemUtils {
 	/**
 	 * Obtain Virtual Memory from Operating System's RAM.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -227,6 +218,25 @@ public class SystemUtils {
 	 * @return bytes size
 	 */
 	public static long osTotalPhysicalMemory() {
+		if(containerized == null){
+			containerized = isContainerized();
+		}
+
+		if(containerized) {
+			try{
+				return getMemoryLimitFromCgroup();
+
+			}catch (IOException e) {
+				logger.debug("Could not get memory limit from c group. {}", e.getMessage());
+			}
+		}
+
+		return getTotalPhysicalMemorySize();
+
+	}
+
+	public static long getTotalPhysicalMemorySize(){
+
 		final OperatingSystemMXBean osBean = ManagementFactory.getOperatingSystemMXBean();
 		if (osBean instanceof UnixOperatingSystemMXBean) {
 			return (((UnixOperatingSystemMXBean) osBean).getTotalPhysicalMemorySize());
@@ -240,15 +250,13 @@ public class SystemUtils {
 				return -1L;
 			}
 		}
+
 	}
+
 
 	/**
 	 * Obtain Free Physical Memory from Operating System's RAM.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -273,16 +281,26 @@ public class SystemUtils {
 	 * @return the amount of available physical memory
 	 */
 	public static long osAvailableMemory() {
-		return Pointer.availablePhysicalBytes();
+		if(containerized == null){
+			containerized = isContainerized();
+		}
+
+		if(containerized) {
+			try{
+				return getMemAvailableFromCgroup();
+
+			}catch (IOException e) {
+				logger.debug("Could not get mem available from cgroup. Will return os free physical memory instead.");
+                return osFreePhysicalMemory();
+            }
+        }
+
+		return availablePhysicalBytes();
 	}
 
 	/**
 	 * Obtain In Use Physical Memory from Operating System's RAM.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -293,10 +311,6 @@ public class SystemUtils {
 	/**
 	 * Obtain Total Swap Space from Operating System's RAM.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -319,10 +333,6 @@ public class SystemUtils {
 	/**
 	 * Obtain Free Swap Space from Operating System's RAM.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -345,10 +355,6 @@ public class SystemUtils {
 	/**
 	 * Obtain In Use Swap Space from Operating System's RAM.
 	 * 
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -371,10 +377,6 @@ public class SystemUtils {
 	 * Obtain Harddrive's Usable Space.
 	 * 
 	 * @param path actual path
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -394,10 +396,6 @@ public class SystemUtils {
 	 * Obtain Harddrive's Overall Space.
 	 * 
 	 * @param path actual path
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -417,10 +415,6 @@ public class SystemUtils {
 	 * Obtain Harddrive's Available Space.
 	 * 
 	 * @param path actual path
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -440,10 +434,6 @@ public class SystemUtils {
 	 * Obtain Harddrive's In Use Space.
 	 * 
 	 * @param path actual path
-	 * @param size null, AUTO, B, KB, MB, GB, TB, or PB
-	 * (PetaByte does not exist yet)
-	 * Is not case sensitive.
-	 * @param txtByte true if include byte extension, false exclude extension
 	 * @return bytes size
 	 * 
 	 */
@@ -698,7 +688,6 @@ public class SystemUtils {
 		}
 	}
 
-
 	private static HotSpotDiagnosticMXBean getHotspotMBean() {
 		try {
 			synchronized (SystemUtils.class) {
@@ -714,6 +703,119 @@ public class SystemUtils {
 			throw new RuntimeException(exp);
 		}
 		return hotspotMBean;
+	}
+
+	public static long availablePhysicalBytes(){
+		return Pointer.availablePhysicalBytes();
+	}
+
+	public static boolean isContainerized() {
+		try {
+			Path dockerEnvPath = Paths.get("/.dockerenv");
+
+			// 1. Check for .dockerenv file
+			if (Files.exists(dockerEnvPath)) {
+				logger.debug("Container detected via .dockerenv file");
+				return true;
+			}
+
+			// 2. Check env variable
+			String container = System.getenv("container");
+			if(StringUtils.isNotBlank(container)){
+				logger.debug("Container detected via env variable.");
+				return true;
+			}
+
+			// 3. Check cgroup info
+			Path cgroupPath = Paths.get("/proc/self/cgroup");
+			if (Files.exists(cgroupPath)) {
+				List<String> cgroupContent = Files.readAllLines(cgroupPath);
+				for (String line : cgroupContent) {
+					if (line.contains("docker") ||
+							line.contains("lxc") ||
+							line.contains("kubepods") ||
+							line.contains("containerd")) {
+						logger.debug("Container detected via cgroup: {}", line);
+						return true;
+					}
+				}
+			}
+
+		} catch (Exception e) {
+			logger.error("Error during container detection: {}", e.getMessage());
+
+		}
+
+		return false;
+	}
+
+	public static Long getMemoryLimitFromCgroup() throws IOException {
+		long memoryLimit;
+
+		// Try reading memory limit for cgroups v1
+		if (Files.exists(Paths.get("/sys/fs/cgroup/memory/memory.limit_in_bytes"))) {
+			String memoryLimitString = readCgroupFile("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+
+			memoryLimit = Long.parseLong(memoryLimitString);
+
+			// In cgroups v1, if the memory limit for a container isn't set, it typically returns 9223372036854771712 (2^63-1).
+			// However, this value may vary based on the architecture.
+			// Therefore, we consider it acceptable if the returned memory limit exceeds 100TB, indicating that the limit is not configured using cgroups.
+			if(memoryLimit > MAX_CONTAINER_MEMORY_LIMIT_BYTES || memoryLimit == 0 || memoryLimit == -1) {
+				memoryLimit = getTotalPhysicalMemorySize();
+			}
+
+		// Try reading memory limit for cgroups v2
+		} else if (Files.exists(Paths.get("/sys/fs/cgroup/memory.max"))) {
+			String memoryLimitString = readCgroupFile("/sys/fs/cgroup/memory.max");
+
+			if(MAX_MEMORY_CGROUP_V2.equals(memoryLimitString)){ // memory limit is not set using cgroups v2
+				memoryLimit = getTotalPhysicalMemorySize();
+			}else{
+				memoryLimit = Long.parseLong(memoryLimitString);
+			}
+
+
+		} else {
+			logger.debug("Could not find cgroup max memory file. Will return os physical memory instead.");
+			return getTotalPhysicalMemorySize();
+		}
+
+		return memoryLimit;
+	}
+
+	public static Long getMemAvailableFromCgroup() throws IOException {
+		Long memoryUsage;
+		Long memoryLimit;
+
+		// Try reading memory usage and limit for cgroups v1
+		if (Files.exists(Paths.get("/sys/fs/cgroup/memory/memory.usage_in_bytes")) &&
+				Files.exists(Paths.get("/sys/fs/cgroup/memory/memory.limit_in_bytes"))) {
+			String memoryUsageString = readCgroupFile("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+			memoryUsage = Long.parseLong(memoryUsageString);
+			memoryLimit = getMemoryLimitFromCgroup();
+
+			// Try reading memory usage and limit for cgroups v2
+		} else if (Files.exists(Paths.get("/sys/fs/cgroup/memory.current")) &&
+				Files.exists(Paths.get("/sys/fs/cgroup/memory.max"))) {
+
+			String memoryUsageString = readCgroupFile("/sys/fs/cgroup/memory.current");
+			memoryUsage = Long.parseLong(memoryUsageString);
+			memoryLimit = getMemoryLimitFromCgroup();
+
+		} else {
+			logger.debug("Could not find cgroup memory files. Will return os free physical memory instead.");
+			return osFreePhysicalMemory();
+		}
+
+		// Calculate available memory
+		return memoryLimit - memoryUsage;
+	}
+
+	public static String readCgroupFile(String filePath) throws IOException {
+		try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
+			return reader.readLine().trim();
+		}
 	}
 	
 }

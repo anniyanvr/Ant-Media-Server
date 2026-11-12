@@ -1,4 +1,5 @@
 package io.antmedia.datastore.db.types;
+import org.apache.commons.lang3.StringUtils;
 import org.bson.types.ObjectId;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
@@ -18,7 +19,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 @Schema(description = "The time based token subscriber class. This keeps which subscriber can access to which stream and which TOTP")
 public class Subscriber {
     
-    @JsonIgnore
+	@JsonIgnore
     public static final String PLAY_TYPE = "play";
     
     @JsonIgnore
@@ -37,18 +38,18 @@ public class Subscriber {
      */
     @Schema(description = "The subscriber id of the subscriber")
     private String subscriberId;
+    
+    /**
+     * The subscriber name of the subscriber
+     */
+    @Schema(description = "The subscriber name of the subscriber")
+    private String subscriberName;
 
     /**
      * The stream id of the token
      */
     @Schema(description = "The stream id of the token")
     private String streamId;  
-
-    /**
-     * Stats for this subscriber
-     */
-    @Schema(description = "Stats for this subscriber")
-    private SubscriberStats stats = new SubscriberStats();
 
     /**
      * Secret code of the Subscriber
@@ -65,10 +66,7 @@ public class Subscriber {
 
     /**
      * Is subscriber connected
-     * TODO: Write what the recommend way is to get this information? Let's write some comments when we deprecate something 
-     * @mekya
      */
-    @Deprecated(since = "2.4.3", forRemoval = true)
     @Schema(description = "Is subscriber connected")
     private boolean connected;
 
@@ -97,22 +95,50 @@ public class Subscriber {
     private long blockedUntilUnitTimeStampMs = 0;
 
     private String registeredNodeIp;
+    
+    /**
+     * The average video bitrate for a subscriber.
+     */
+    @Schema(description = "Average video bitrate for a subscriber")
+    private long avgVideoBitrate;
 
-	public String getSubscriberId() {
-		return subscriberId;
-	}
+    /**
+     * The average audio bitrate for a subscriber.
+     */
+    @Schema(description = "Average audio bitrate for a subscriber")
+    private long avgAudioBitrate;
 
+    /**
+     * Custom TOTP expiry period in seconds for this subscriber.
+     * If null, falls back to global timeTokenPeriod setting.
+     */
+    @Schema(description = "Custom TOTP expiry period in seconds for this subscriber")
+    private Integer totpExpiryPeriodSeconds;
+
+	
 	public void setSubscriberId(String subscriberId) {
 		this.subscriberId = subscriberId;
 	}
-
-	public String getStreamId() {
-		return streamId;
+	
+	public String getSubscriberId() {
+		return subscriberId;
+	}
+	
+	public void setSubscriberName(String subscriberName) {
+		this.subscriberName = subscriberName;
+	}
+	
+	public String getSubscriberName() {
+		return subscriberName;
 	}
 
 	public void setStreamId(String streamId) {
 		this.streamId = streamId;
 	}	
+	
+	public String getStreamId() {
+		return streamId;
+	}
 
 	public String getB32Secret() {
 		return b32Secret;
@@ -122,19 +148,6 @@ public class Subscriber {
 		this.b32Secret = b32Secret;
 	}
 
-	public SubscriberStats getStats() {
-		return stats;
-	}
-
-	@JsonIgnore
-	public void setStats(SubscriberStats stats) {
-		if(stats != null)  {
-			stats.setStreamId(streamId);
-			stats.setSubscriberId(subscriberId);
-		}
-		this.stats = stats;
-	}
-
 	// database key of a subscriber consists both the stream id and subscriber id
 	@JsonIgnore
 	public String getSubscriberKey() {
@@ -142,7 +155,10 @@ public class Subscriber {
 	}
 
 	public static String getDBKey(String streamId, String subscriberId) {
-		return streamId + "-" +subscriberId;
+		if (StringUtils.isNoneBlank(streamId, subscriberId)) {
+			return streamId + "-" +subscriberId;
+		}
+		return null;
 	}
 
 	public String getType() {
@@ -156,12 +172,10 @@ public class Subscriber {
 		}
 	}
 
-	@Deprecated(since="2.4.3", forRemoval=true)
 	public boolean isConnected() {
 		return connected;
 	}
 
-	@Deprecated(since="2.4.3", forRemoval=true)
 	public void setConnected(boolean connected) {
 		this.connected = connected;
 	}
@@ -213,5 +227,49 @@ public class Subscriber {
 
 	public void setBlockedUntilUnitTimeStampMs(long blockedUntilUnitTimeStampMs) {
 		this.blockedUntilUnitTimeStampMs = blockedUntilUnitTimeStampMs;
+	}
+
+	/**
+	 * @return the avgVideoBitrate
+	 */
+	public long getAvgVideoBitrate() {
+		return avgVideoBitrate;
+	}
+
+	/**
+	 * @param avgVideoBitrate the avgVideoBitrate to set
+	 */
+	public void setAvgVideoBitrate(long avgVideoBitrate) {
+		this.avgVideoBitrate = avgVideoBitrate;
+	}
+
+	/**
+	 * @return the avgAudioBitrate
+	 */
+	public long getAvgAudioBitrate() {
+		return avgAudioBitrate;
+	}
+
+	/**
+	 * @param avgAudioBitrate the avgAudioBitrate to set
+	 */
+	public void setAvgAudioBitrate(long avgAudioBitrate) {
+		this.avgAudioBitrate = avgAudioBitrate;
+	}
+
+	/**
+	 * Gets the custom TOTP expiry period in seconds for this subscriber.
+	 * @return the custom TOTP expiry period in seconds, or null if not set
+	 */
+	public Integer getTotpExpiryPeriodSeconds() {
+		return totpExpiryPeriodSeconds;
+	}
+
+	/**
+	 * Sets the custom TOTP expiry period in seconds for this subscriber.
+	 * @param totpExpiryPeriodSeconds the expiry period in seconds configurable by the user
+	 */
+	public void setTotpExpiryPeriodSeconds(Integer totpExpiryPeriodSeconds) {
+		this.totpExpiryPeriodSeconds = totpExpiryPeriodSeconds;
 	}
 }

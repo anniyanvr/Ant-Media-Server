@@ -1,7 +1,10 @@
 package io.antmedia.test.valves;
 
 
-import static org.junit.Assert.assertEquals;
+
+import org.junit.jupiter.api.Tag;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import static org.mockito.Mockito.*;
 
 import java.io.IOException;
@@ -9,14 +12,15 @@ import java.io.IOException;
 import org.apache.catalina.connector.Request;
 import org.apache.catalina.connector.Response;
 import org.apache.catalina.Valve;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.*;
 import org.red5.server.api.scope.IScope;
 import org.springframework.web.context.ConfigurableWebApplicationContext;
 import org.springframework.web.context.WebApplicationContext;
 
 import io.antmedia.AntMediaApplicationAdapter;
+import io.antmedia.AppSettings;
 import io.antmedia.analytic.model.PlayerStatsEvent;
 import io.antmedia.filter.TokenFilterManager;
 import io.antmedia.logger.LoggerUtils;
@@ -25,6 +29,7 @@ import jakarta.servlet.ServletContext;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 
+@Tag("fast")
 public class DataTransferValveTest {
 
 	@InjectMocks
@@ -51,13 +56,15 @@ public class DataTransferValveTest {
     @Captor
     private ArgumentCaptor<PlayerStatsEvent> eventCaptor;
 
-    @Before
+    @BeforeEach
     public void setup() {
         MockitoAnnotations.openMocks(this);
         
         when(request.getServletContext()).thenReturn(servletContext);
         when(request.getServletContext().getAttribute(WebApplicationContext.ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE)).thenReturn(context);
         when(context.getBean(AntMediaApplicationAdapter.BEAN_NAME)).thenReturn(appAdapter);
+        when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(new AppSettings());
+
         
         when(appAdapter.getScope()).thenReturn(Mockito.mock(IScope.class));
         when(appAdapter.getScope().getName()).thenReturn("appScope");
@@ -77,6 +84,11 @@ public class DataTransferValveTest {
 
          // Verify interactions
          verify(nextValve).invoke(request, response);
+         verify(context, times(0)).getBean(AntMediaApplicationAdapter.BEAN_NAME);
+         
+         
+         when(context.isRunning()).thenReturn(true);
+         dataTransferValveSpy.invoke(request, response);
          verify(context, times(1)).getBean(AntMediaApplicationAdapter.BEAN_NAME);
 
          // Verify static method interaction

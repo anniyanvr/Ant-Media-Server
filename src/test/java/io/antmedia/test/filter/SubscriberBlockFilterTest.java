@@ -1,6 +1,9 @@
 package io.antmedia.test.filter;
 
-import static org.junit.Assert.fail;
+
+import org.junit.jupiter.api.Tag;
+import static org.junit.jupiter.api.Assertions.fail;
+
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -8,10 +11,10 @@ import jakarta.servlet.FilterConfig;
 import jakarta.servlet.ServletContext;
 
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.rules.TestRule;
 import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
@@ -23,6 +26,7 @@ import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.web.context.ConfigurableWebApplicationContext;
 import org.springframework.web.context.WebApplicationContext;
 
+import io.antmedia.AppSettings;
 import io.antmedia.datastore.db.DataStore;
 import io.antmedia.datastore.db.DataStoreFactory;
 import io.antmedia.datastore.db.types.Broadcast;
@@ -32,6 +36,7 @@ import io.antmedia.statistic.HlsViewerStats;
 import io.antmedia.statistic.IStreamStats;
 import jakarta.ws.rs.HttpMethod;
 
+@Tag("fast")
 public class SubscriberBlockFilterTest {
 
     private SubscriberBlockFilter subscriberBlockFilter;
@@ -39,12 +44,12 @@ public class SubscriberBlockFilterTest {
     protected static Logger logger = LoggerFactory.getLogger(SubscriberBlockFilterTest.class);
 
 
-    @Before
+    @BeforeEach
     public void before() {
         subscriberBlockFilter = new SubscriberBlockFilter();
     }
 
-    @After
+    @AfterEach
     public void after() {
         subscriberBlockFilter = null;
     }
@@ -94,6 +99,9 @@ public class SubscriberBlockFilterTest {
             DataStore dataStore = mock(DataStore.class);
             when(dataStore.isAvailable()).thenReturn(true);
             when(dsf.getDataStore()).thenReturn(dataStore);
+            
+            AppSettings appSettings = new AppSettings();
+    		when(context.getBean(AppSettings.BEAN_NAME)).thenReturn(appSettings);
 
             subscriberBlockFilter.doFilter(httpServletRequest1, httpServletResponse, filterChain1);
 

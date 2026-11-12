@@ -1,12 +1,13 @@
 package io.antmedia.test.launcher;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
-
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.red5.logging.Red5LoggerFactory;
 import org.red5.server.Launcher;
 import org.red5.server.scope.WebScope;
@@ -15,6 +16,8 @@ import org.springframework.test.annotation.DirtiesContext.ClassMode;
 import org.springframework.test.context.ContextConfiguration;
 
 import io.antmedia.AsciiArt;
+import io.antmedia.rest.RestServiceBase;
+import io.antmedia.rest.model.Version;
 
 
 @ContextConfiguration(locations = { "test.xml" })
@@ -49,10 +52,16 @@ public class LauncherUnitTest {
 	
 	@Test
 	public void testLaunch() {
-		Launcher launcher = new Launcher();
-		assertEquals("Community", Launcher.getVersionType());
-		assertEquals("Community", launcher.getVersionType()); //increase coverage
-		Launcher.getVersion();
+		Version version = RestServiceBase.getSoftwareVersion();
+		assertEquals("Community Edition", version.getVersionType());
+		assertNotEquals("Community", version.getBuildNumber()); //increase coverage
+		assertNotEquals("Community", version.getVersionName());
+		
+		//jar:file:/Users/mekya/softwares/ant-media-server/ant-media-server.jar!/META-INF/MANIFEST.MF 
+		assertEquals("20250318_1130", RestServiceBase.getBuildNumber("file:src/test/resources/MANIFEST.MF"));
+		
+		assertNull(RestServiceBase.getBuildNumber("src/test/resources/MANIFEST.MF"));
+		
 	}
 	
 	@Test

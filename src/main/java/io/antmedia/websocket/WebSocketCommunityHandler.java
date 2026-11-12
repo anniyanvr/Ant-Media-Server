@@ -15,6 +15,8 @@ import org.webrtc.IceCandidate;
 import org.webrtc.SessionDescription;
 import org.webrtc.SessionDescription.Type;
 
+import com.nimbusds.oauth2.sdk.util.StringUtils;
+
 import io.antmedia.AntMediaApplicationAdapter;
 import io.antmedia.AppSettings;
 import io.antmedia.StreamIdValidator;
@@ -41,6 +43,9 @@ public class WebSocketCommunityHandler {
 	private AntMediaApplicationAdapter appAdaptor;
 	
 	protected String userAgent = "N/A";
+	
+	protected String clientIP = "N/A";
+
 	
 	public WebSocketCommunityHandler(ApplicationContext appContext, Session session) {
 		this.appContext = appContext;
@@ -148,7 +153,7 @@ public class WebSocketCommunityHandler {
 			else if (cmd.equals(WebSocketConstants.PING_COMMAND)) {
 				sendPongMessage(session);
 			}
-			else if (cmd.equals(WebSocketConstants.GET_STREAM_INFO_COMMAND) || cmd.equals(WebSocketConstants.PLAY_COMMAND)) 
+			else if (cmd.equals(WebSocketConstants.GET_STREAM_INFO_COMMAND) || cmd.equals(WebSocketConstants.PLAY_COMMAND))
 			{
 				sendNotFoundJSON(streamId, session);
 			}
@@ -161,7 +166,6 @@ public class WebSocketCommunityHandler {
 		}
 
 	}
-		
 
 	private void startRTMPAdaptor(Session session, final String streamId, boolean enableVideo) {
 		int rtmpPort = appAdaptor.getServerSettings().getRtmpPort();
@@ -221,7 +225,7 @@ public class WebSocketCommunityHandler {
 	@SuppressWarnings("unchecked")
 	public  void sendSDPConfiguration(String description, String type, String streamId, Session session, Map<String, String> midSidMap, String linkedSessionForSignaling, String subscriberId) {
 
-		sendMessage(getSDPConfigurationJSON (description, type,  streamId, midSidMap, linkedSessionForSignaling, subscriberId).toJSONString(), session);
+		sendMessage(getSDPConfigurationJSON (description, type,  streamId, midSidMap, linkedSessionForSignaling, subscriberId), session);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -238,7 +242,18 @@ public class WebSocketCommunityHandler {
 		}
 		jsonObj.put(WebSocketConstants.SUBSCRIBER_ID, subscriberId);
 
-		sendMessage(jsonObj.toJSONString(), session);
+		sendMessage(jsonObj, session);
+	}
+	
+	@SuppressWarnings("unchecked")
+	public  void sendStreamingStartedMessage(String streamId, Session session) {
+
+		JSONObject jsonObj = new JSONObject();
+		jsonObj.put(WebSocketConstants.COMMAND, WebSocketConstants.NOTIFICATION_COMMAND);
+		jsonObj.put(WebSocketConstants.DEFINITION, WebSocketConstants.STREAMING_STARTED);
+		jsonObj.put(WebSocketConstants.STREAM_ID, streamId);
+
+		sendMessage(jsonObj, session);
 	}
 	
 	public void sendStreamIdInUse(String streamId, Session session) {
@@ -246,14 +261,14 @@ public class WebSocketCommunityHandler {
 		jsonResponse.put(WebSocketConstants.COMMAND, WebSocketConstants.ERROR_COMMAND);
 		jsonResponse.put(WebSocketConstants.DEFINITION, WebSocketConstants.STREAM_ID_IN_USE);
 		jsonResponse.put(WebSocketConstants.STREAM_ID, streamId);
-		sendMessage(jsonResponse.toJSONString(), session);
+		sendMessage(jsonResponse, session);
 	}
 	
 	@SuppressWarnings("unchecked")
 	public void sendPongMessage(Session session) {
 		JSONObject jsonResponseObject = new JSONObject();
 		jsonResponseObject.put(WebSocketConstants.COMMAND, WebSocketConstants.PONG_COMMAND);
-		sendMessage(jsonResponseObject.toJSONString(), session);
+		sendMessage(jsonResponseObject, session);
 	}
 	
 
@@ -264,7 +279,7 @@ public class WebSocketCommunityHandler {
 		jsonObject.put(WebSocketConstants.DEFINITION,  WebSocketConstants.PUBLISH_FINISHED);
 		jsonObject.put(WebSocketConstants.STREAM_ID, streamId);
 		jsonObject.put(WebSocketConstants.SUBSCRIBER_ID, subscriberId);
-		sendMessage(jsonObject.toJSONString(), session);
+		sendMessage(jsonObject, session);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -275,7 +290,7 @@ public class WebSocketCommunityHandler {
 		jsonObject.put(WebSocketConstants.STREAM_ID, streamId);
 		jsonObject.put(WebSocketConstants.SUBSCRIBER_ID, subscriberId);
 
-		sendMessage(jsonObject.toJSONString(), session);
+		sendMessage(jsonObject, session);
 	}
 
 
@@ -284,23 +299,23 @@ public class WebSocketCommunityHandler {
 		JSONObject jsonResponse = new JSONObject();
 		jsonResponse.put(WebSocketConstants.COMMAND, WebSocketConstants.ERROR_COMMAND);
 		jsonResponse.put(WebSocketConstants.DEFINITION, WebSocketConstants.NO_STREAM_ID_SPECIFIED);
-		sendMessage(jsonResponse.toJSONString(), session);
+		sendMessage(jsonResponse, session);
 	}
 	
 	@SuppressWarnings("unchecked")
 	public void sendTakeCandidateMessage(long sdpMLineIndex, String sdpMid, String sdp, String streamId, Session session, String linkedSessionForSignaling, String subscriberId)
 	{
 
-		sendMessage(getTakeCandidateJSON(sdpMLineIndex, sdpMid, sdp, streamId, linkedSessionForSignaling, subscriberId).toJSONString(), session);
+		sendMessage(getTakeCandidateJSON(sdpMLineIndex, sdpMid, sdp, streamId, linkedSessionForSignaling, subscriberId), session);
 	}
 
 
 	@SuppressWarnings("unchecked")
-	public void sendMessage(String message, final Session session) {
+	public void sendMessage(JSONObject message, final Session session) {
 		synchronized (this) {
 			if (session.isOpen()) {
 				try {
-					session.getBasicRemote().sendText(message);
+					session.getBasicRemote().sendText(message.toJSONString());
 				} 
 				catch (Exception e) { 
 					//capture all exceptions because some unexpected events may happen it causes some internal errors
@@ -315,7 +330,10 @@ public class WebSocketCommunityHandler {
 				}
 			}
 		}
+		
 	}
+	
+	
 	
 
 	
@@ -325,14 +343,13 @@ public class WebSocketCommunityHandler {
 		jsonResponse.put(WebSocketConstants.COMMAND, WebSocketConstants.ERROR_COMMAND);
 		jsonResponse.put(WebSocketConstants.DEFINITION, WebSocketConstants.ROOM_NOT_ACTIVE);
 		jsonResponse.put(WebSocketConstants.ROOM, roomId);
-		sendMessage(jsonResponse.toJSONString(), session);
+		sendMessage(jsonResponse, session);
 	}
 	
 	/**
 	 * 
 	 * @param streamIdNameMap this is the map that keys are stream ids and values are stream names
 	 * @param roomId is the id of the room
-	 * @param subscriberId 
 	 */
 	public void sendRoomInformation(Map<String,String> streamIdNameMap , String roomId) 
 	{
@@ -348,8 +365,7 @@ public class WebSocketCommunityHandler {
 		jsObject.put(WebSocketConstants.STREAM_LIST_IN_ROOM, jsonStreamListArray);	
 		jsObject.put(WebSocketConstants.ATTR_ROOM_NAME, roomId);
 		jsObject.put(WebSocketConstants.ROOM, roomId);
-		String jsonString = jsObject.toJSONString();
-		sendMessage(jsonString, session);
+		sendMessage(jsObject, session);
 	}
 
 	private void prepareStreamListJSON(Map<String, String> streamIdNameMap, JSONArray jsonStreamIdArray,
@@ -382,7 +398,7 @@ public class WebSocketCommunityHandler {
 		jsonResponse.put(WebSocketConstants.ROOM, room);	
 		jsonResponse.put(WebSocketConstants.MAX_TRACK_COUNT, appSettings.getMaxVideoTrackCount());	
 		
-		sendMessage(jsonResponse.toJSONString(), session);
+		sendMessage(jsonResponse, session);
 	}
 
 
@@ -429,7 +445,7 @@ public class WebSocketCommunityHandler {
 		jsonResponse.put(WebSocketConstants.COMMAND, WebSocketConstants.ERROR_COMMAND);
 		jsonResponse.put(WebSocketConstants.DEFINITION, WebSocketConstants.INVALID_STREAM_NAME);
 		jsonResponse.put(WebSocketConstants.STREAM_ID, streamId);
-		sendMessage(jsonResponse.toJSONString(), session);	
+		sendMessage(jsonResponse, session);	
 	}
 
 	public ApplicationContext getAppContext() {
@@ -450,7 +466,7 @@ public class WebSocketCommunityHandler {
 		jsonObject.put(WebSocketConstants.DEFINITION, WebSocketConstants.NOT_SET_REMOTE_DESCRIPTION);
 		jsonObject.put(WebSocketConstants.STREAM_ID, streamId);
 		jsonObject.put(WebSocketConstants.SUBSCRIBER_ID, subscriberId);
-		sendMessage(jsonObject.toJSONString(), session);
+		sendMessage(jsonObject, session);
 	}
 	
 	public void sendLocalDescriptionSetFailure(Session session, String streamId, String subscriberId) {
@@ -460,17 +476,33 @@ public class WebSocketCommunityHandler {
 		jsonObject.put(WebSocketConstants.STREAM_ID, streamId);
 		jsonObject.put(WebSocketConstants.SUBSCRIBER_ID, subscriberId);
 		
-		sendMessage(jsonObject.toJSONString(), session);
+		sendMessage(jsonObject, session);
 	}
 	
 	@SuppressWarnings("unchecked")
-	public void sendNotFoundJSON(String streamId, Session session) {
+	public void sendNotFoundJSON(String streamId, String reason, Session session) {
 		JSONObject jsonResponse = new JSONObject();
 		jsonResponse.put(WebSocketConstants.COMMAND, WebSocketConstants.ERROR_COMMAND);
 		jsonResponse.put(WebSocketConstants.ERROR_CODE, "404");
 		jsonResponse.put(WebSocketConstants.DEFINITION, WebSocketConstants.NO_STREAM_EXIST);
+		if (StringUtils.isNotBlank(reason)) {
+			jsonResponse.put(WebSocketConstants.INFORMATION, reason);
+		}
 		jsonResponse.put(WebSocketConstants.STREAM_ID, streamId);
-		sendMessage(jsonResponse.toJSONString(), session);
+		sendMessage(jsonResponse, session);
+	}
+	
+	public void sendNotFoundJSON(String streamId, Session session) {
+		sendNotFoundJSON(streamId, null, session);
+	}
+	
+	@SuppressWarnings("unchecked")
+	public void sendStreamingStartsSoonMessage(String streamId, Session session) {
+		JSONObject jsonResponse = new JSONObject();
+		jsonResponse.put(WebSocketConstants.COMMAND, WebSocketConstants.NOTIFICATION_COMMAND);
+		jsonResponse.put(WebSocketConstants.DEFINITION, WebSocketConstants.STREAMING_STARTS_SOON_DEFINITION);
+		jsonResponse.put(WebSocketConstants.STREAM_ID, streamId);
+		sendMessage(jsonResponse, session);
 	}
 
 	public void sendServerError(String streamId, Session session) {
@@ -478,7 +510,7 @@ public class WebSocketCommunityHandler {
 		jsonResponse.put(WebSocketConstants.COMMAND, WebSocketConstants.ERROR_COMMAND);
 		jsonResponse.put(WebSocketConstants.DEFINITION, WebSocketConstants.SERVER_ERROR_CHECK_LOGS);
 		jsonResponse.put(WebSocketConstants.STREAM_ID, streamId);
-		sendMessage(jsonResponse.toJSONString(), session);
+		sendMessage(jsonResponse, session);
 		
 	}
 
@@ -493,5 +525,13 @@ public class WebSocketCommunityHandler {
 
 	public void setUserAgent(String userAgent) {
 		this.userAgent = userAgent;
+	}
+
+	public String getClientIP() {
+		return clientIP;
+	}
+
+	public void setClientIP(String clientIP) {
+		this.clientIP = clientIP;
 	}
 }

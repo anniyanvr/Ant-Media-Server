@@ -1,19 +1,18 @@
 package io.antmedia.test;
 
 
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
+
+import org.junit.jupiter.api.Tag;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-import org.junit.Test;
-import org.red5.server.service.ShutdownServer;
-
 import io.antmedia.shutdown.AMSShutdownManager;
 import io.antmedia.shutdown.IShutdownListener;
+import org.junit.jupiter.api.Test;
 
 
+@Tag("fast")
 public class AMSShutdownManagerUnitTest {
 	
 	@Test

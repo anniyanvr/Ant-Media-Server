@@ -46,12 +46,16 @@ import org.springframework.beans.factory.InitializingBean;
  */
 public class WarDeployer implements InitializingBean, DisposableBean {
 
-    private Logger log = LoggerFactory.getLogger(WarDeployer.class);
+    private static final Logger log = LoggerFactory.getLogger(WarDeployer.class);
 
     //that wars are currently being installed
-    private static AtomicBoolean deploying = new AtomicBoolean(false);
+    private static final AtomicBoolean deploying = new AtomicBoolean(false);
 
-    private ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "war-deployer");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private ScheduledFuture<DeployJob> future;
 
@@ -112,14 +116,9 @@ public class WarDeployer implements InitializingBean, DisposableBean {
             for (File f : files) {
                 // get the war name
                 applicationWarName = f.getName();
-                int dashIndex = applicationWarName.indexOf('-');
-                if (dashIndex != -1) {
-                    // strip everything except the applications name
-                    application = applicationWarName.substring(0, dashIndex);
-                } else {
-                    // grab every char up to the last '.'
-                    application = applicationWarName.substring(0, applicationWarName.lastIndexOf('.'));
-                }
+                // Remove the file extension first
+                application = getApplicationName(applicationWarName);
+                
                 log.debug("Application name: {}", application);
                 // setup context
                 String contextPath = '/' + application;
@@ -167,6 +166,27 @@ public class WarDeployer implements InitializingBean, DisposableBean {
             deploying.set(false);
         }
     }
+
+	public static String getApplicationName(String applicationWarName) {
+		String application;
+		int lastIndexOfDot = applicationWarName.lastIndexOf('.');
+		String baseName = applicationWarName.substring(0, lastIndexOfDot != -1 ? lastIndexOfDot : applicationWarName.length());
+
+		int dashIndex = baseName.lastIndexOf('-'); // find last dash (not first)
+
+		if (dashIndex != -1) {
+		    String suffix = baseName.substring(dashIndex + 1);
+		    if (suffix.matches("\\d+(\\.\\d+)*")) {
+		        // if after dash is version numbers like "1.0.0" or "2024.04.26"
+		        application = baseName.substring(0, dashIndex);
+		    } else {
+		        application = baseName;
+		    }
+		} else {
+		    application = baseName;
+		}
+		return application;
+	}
 
     @Override
     public void destroy() throws Exception {

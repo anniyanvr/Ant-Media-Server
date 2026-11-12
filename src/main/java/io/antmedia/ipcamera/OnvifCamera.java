@@ -13,6 +13,7 @@ import org.onvif.ver10.schema.Profile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.antmedia.UrlQueryUtils;
 import io.antmedia.ipcamera.onvif.soap.OnvifDevice;
 import io.antmedia.ipcamera.onvif.soap.devices.PtzDevices;
 
@@ -25,6 +26,8 @@ public class OnvifCamera implements IOnvifCamera {
 	public static final int CONNECTION_SUCCESS = 0;
 	public static final int CONNECT_ERROR = -1;
 	public static final int AUTHENTICATION_ERROR = -2;
+	private static final String PROFILE_INDEX = "profileIndex";
+
 	String profileToken;
 	private static final String HTTP_PREFIX = "http://";
 	private static final String HTTPS_PREFIX = "https://";
@@ -37,14 +40,18 @@ public class OnvifCamera implements IOnvifCamera {
 	public int connect(String address, String username, String password) {
 		int result = CONNECT_ERROR;
 		String camIP = "";
+		int profileIndex = 0;
 		try {
 
+			
 			//address may include http:// or https:// so get the IPAddress directly
 			camIP = getIPAddress(address);
 
+			profileIndex = getProfileIndex(address);
+
 			String protocol = getProtocol(address);
 			
-			nvt = new OnvifDevice(camIP, protocol, username, password);
+			nvt = createOnvifDevice(camIP, protocol, username, password);
 			nvt.getSoap().setLogging(false);
 			nvt.getDevices().getCapabilities().getDevice();
 			nvt.getDevices().getServices(false);
@@ -54,16 +61,17 @@ public class OnvifCamera implements IOnvifCamera {
 
 			if (profiles != null)
 			{
-				for (Profile profile : profiles) {
-					if (profile.getPTZConfiguration() != null) {
-						profileToken = profile.getToken();
-						break;
+				profileToken = profiles.get(profileIndex).getToken();
+				
+				if(profileToken == null) {
+					for (Profile profile : profiles) {
+						if (profile.getPTZConfiguration() != null) {
+							profileToken = profile.getToken();
+							break;
+						}
 					}
 				}
-				if (profileToken == null) {
-					profileToken = profiles.get(0).getToken();
-				}
-
+				
 				result = CONNECTION_SUCCESS;
 			}
 			else {
@@ -79,6 +87,31 @@ public class OnvifCamera implements IOnvifCamera {
 			result = CONNECT_ERROR;
 		}
 		return result;
+	}
+
+	private int getProfileIndex(String address) {
+		int profileIndex = 0;
+		
+		if (address.contains("?")){
+			String[] ipAddrParts = address.split("\\?");
+			
+			String query = ipAddrParts[1];
+
+			for (String value : UrlQueryUtils.getParamValues(query, PROFILE_INDEX)) {
+				try {
+					profileIndex = Integer.parseInt(value);
+				}
+				catch(NumberFormatException e){
+					logger.error("Profile index for IP camera should be an integer but it is {}", value);
+				}
+			}
+		}
+		
+		return profileIndex;
+	}
+
+	protected OnvifDevice createOnvifDevice(String camIP, String protocol, String username, String password) throws ConnectException, SOAPException {
+		return new OnvifDevice(camIP, protocol, username, password);
 	}
 
 	public String getProtocol(String address) {
@@ -298,6 +331,10 @@ public class OnvifCamera implements IOnvifCamera {
 			logger.info("IP: {}", ipAddr);
 
 
+		}
+		if (ipAddr.contains("?")){
+			ipAddrParts = ipAddr.split("\\?");
+			ipAddr = ipAddrParts[0];
 		}
 		return ipAddr;
 	}

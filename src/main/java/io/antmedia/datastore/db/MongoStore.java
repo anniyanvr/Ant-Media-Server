@@ -9,18 +9,27 @@ import java.io.File;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
-import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.cache.caffeine.CaffeineCache;
+import org.springframework.cache.caffeine.CaffeineCacheManager;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
 import com.mongodb.client.result.DeleteResult;
 import com.mongodb.client.result.UpdateResult;
 
@@ -35,22 +44,22 @@ import dev.morphia.query.MorphiaCursor;
 import dev.morphia.query.Query;
 import dev.morphia.query.Sort;
 import dev.morphia.query.Update;
+import dev.morphia.query.filters.Filter;
 import dev.morphia.query.filters.Filters;
+import dev.morphia.query.filters.LogicalFilter;
 import dev.morphia.query.updates.UpdateOperator;
 import dev.morphia.query.updates.UpdateOperators;
 import io.antmedia.AntMediaApplicationAdapter;
 import io.antmedia.datastore.db.types.Broadcast;
-import io.antmedia.datastore.db.types.ConferenceRoom;
+import io.antmedia.datastore.db.types.BroadcastUpdate;
+import io.antmedia.datastore.db.types.ConnectionEvent;
 import io.antmedia.datastore.db.types.Endpoint;
 import io.antmedia.datastore.db.types.P2PConnection;
-import io.antmedia.datastore.db.types.PushNotificationToken;
 import io.antmedia.datastore.db.types.StreamInfo;
 import io.antmedia.datastore.db.types.Subscriber;
 import io.antmedia.datastore.db.types.SubscriberMetadata;
-import io.antmedia.datastore.db.types.TensorFlowObject;
 import io.antmedia.datastore.db.types.Token;
 import io.antmedia.datastore.db.types.VoD;
-import io.antmedia.datastore.db.types.WebRTCViewerInfo;
 import io.antmedia.muxer.IAntMediaStreamHandler;
 import io.antmedia.muxer.MuxAdaptor;
 
@@ -60,7 +69,9 @@ public class MongoStore extends DataStore {
 	private static final String VIEWER_ID = "viewerId";
 	private static final String TOKEN_ID = "tokenId";
 	public static final String STREAM_ID = "streamId";
-	public static final String SUBSCRIBER_ID = "subscriberId"; 
+	public static final String SUBSCRIBER_ID = "subscriberId";
+	private static final String MAIN_TRACK_STREAM_ID = "mainTrackStreamId";
+	private static final String ROLE = "role";
 	private Datastore datastore;
 	private Datastore vodDatastore;
 	private Datastore tokenDatastore;
@@ -68,10 +79,15 @@ public class MongoStore extends DataStore {
 	private Datastore detectionMap;
 	private Datastore conferenceRoomDatastore;
 	private MongoClient mongoClient;
+	public CaffeineCacheManager cacheManager;
+	public CaffeineCacheManager broadcastCacheManager;
+	public CaffeineCache subscriberCache;
+	public CaffeineCache broadcastCache;
+
 
 	protected static Logger logger = LoggerFactory.getLogger(MongoStore.class);
 
-	public static final String IMAGE_ID = "imageId"; 
+	public static final String IMAGE_ID = "imageId";
 	public static final String STATUS = "status";
 	private static final String ORIGIN_ADDRESS = "originAdress";
 	private static final String START_TIME = "startTime"; 
@@ -82,10 +98,27 @@ public class MongoStore extends DataStore {
 	private static final String DASH_VIEWER_COUNT = "dashViewerCount";
 	private static final String WEBRTC_VIEWER_COUNT = "webRTCViewerCount";
 	private static final String META_DATA = "metaData";
+	private static final String UPDATE_TIME_FIELD = "updateTime";
 
-	public MongoStore(String host, String username, String password, String dbName) {
+	public static final String OLD_STREAM_ID_INDEX_NAME = "streamId_1";
+	public static final String SUBSCRIBER_CACHE = "subscriberCache";
+	public static final String BROADCAST_CACHE = "broadcastCache";
+	public static final int SUBSCRIBER_CACHE_SIZE = 1000;
+	public static final int SUBSCRIBER_CACHE_EXPIRE_SECONDS = 10;
+	public static final int BROADCAST_CACHE_SIZE = 1000;
+	public static final int BROADCAST_CACHE_EXPIRE_SECONDS = 3;
+	private static final String CONNECTED = "connected";
+	
+	private Object broadcastLock = new Object();
+	private Object vodLock = new Object();
+	private Object tokenLock = new Object();
+	private Object subscriberLock = new Object();
+	private Object detectionLock = new Object();
+	private Object roomLock = new Object();
 
-		String uri = getMongoConnectionUri(host, username, password);
+	public MongoStore(String host, String dbName) {
+
+		String uri = MongoStore.getMongoConnectionUri(host);
 
 
 		mongoClient = MongoClients.create(uri);
@@ -99,19 +132,20 @@ public class MongoStore extends DataStore {
 		detectionMap = Morphia.createDatastore(mongoClient, dbName + "detection");
 		conferenceRoomDatastore = Morphia.createDatastore(mongoClient, dbName + "room");
 
+
 		//*************************************************
 		//do not create data store for each type as we do above
 		//*************************************************
 		datastore.getMapper().mapPackage("io.antmedia.datastore.db.types");
-		
-		
+
+
 		//TODO: only map related class not all of them
 		tokenDatastore.getMapper().mapPackage("io.antmedia.datastore.db.types");
 		subscriberDatastore.getMapper().mapPackage("io.antmedia.datastore.db.types");
 		vodDatastore.getMapper().mapPackage("io.antmedia.datastore.db.types");
 		detectionMap.getMapper().mapPackage("io.antmedia.datastore.db.types");
 		conferenceRoomDatastore.getMapper().mapPackage("io.antmedia.datastore.db.types");
-		
+
 		tokenDatastore.ensureIndexes();
 		subscriberDatastore.ensureIndexes();
 		datastore.ensureIndexes();
@@ -120,54 +154,66 @@ public class MongoStore extends DataStore {
 		conferenceRoomDatastore.ensureIndexes();
 
 		available = true;
+
+		cacheManager = new CaffeineCacheManager(SUBSCRIBER_CACHE);
+
+		cacheManager.setCaffeine(Caffeine.newBuilder()
+				.maximumSize(SUBSCRIBER_CACHE_SIZE)
+				.expireAfterWrite(SUBSCRIBER_CACHE_EXPIRE_SECONDS, TimeUnit.SECONDS)
+				);
 		
-		//migrate from conference room to broadcast
-		// May 11, 2024
-		// we may remove this code after some time and ConferenceRoom class
-		// mekya
-		migrateConferenceRoomsToBroadcasts();
-		
-		
+		broadcastCacheManager = new CaffeineCacheManager(BROADCAST_CACHE);
+
+		broadcastCacheManager.setCaffeine(Caffeine.newBuilder()
+				.maximumSize(BROADCAST_CACHE_SIZE)
+				.expireAfterWrite(BROADCAST_CACHE_EXPIRE_SECONDS, TimeUnit.SECONDS)
+				);
+
 	}	
-	
-	@Override
-	public void migrateConferenceRoomsToBroadcasts() {
-		while (true) {
-			Query<ConferenceRoom> query = conferenceRoomDatastore.find(ConferenceRoom.class);
-			ConferenceRoom conferenceRoom = query.first();
-			if (conferenceRoom != null) {
-				try {
-					Broadcast broadcast = conferenceToBroadcast(conferenceRoom);
-					save(broadcast);
-					conferenceRoomDatastore.delete(conferenceRoom);
-				} catch (Exception e) {
-					logger.error(ExceptionUtils.getStackTrace(e));
+
+	public void deleteDuplicateStreamIds(MongoCollection<Broadcast> collection) {
+
+		long startTime = System.nanoTime();
+		// Use a set to track unique appNames
+		Set<String> uniqueStreamIds = new HashSet<>();
+
+
+		try (MongoCursor<Broadcast> cursor = collection.find(Broadcast.class).iterator()) {
+			while (cursor.hasNext()) {
+				Broadcast doc = cursor.next();
+				String streamId = doc.getStreamId();
+
+				// Check if appName is already encountered
+				if (uniqueStreamIds.contains(streamId)) {
+					// If duplicate, delete the document
+					collection.deleteOne(com.mongodb.client.model.Filters.eq("_id", doc.getDbId()));
+				} else {
+					// Add to the set of unique appNames
+					uniqueStreamIds.add(streamId);
 				}
-			} else {
-				break;
 			}
 		}
 		
+		recordQueryDuration(startTime, "deleteDuplicateStreamIds");
 	}
-
-	public static String getMongoConnectionUri(String host, String username, String password) {
+	
+	
+	public static String getMongoConnectionUri(String url) {
 		//If it is DNS seed name, no need to check for username and password since it needs to be integrated to the given uri.
-		//Mongodb Atlas users will have such syntax and won't need to enter seperate username and password to the script since it is already in the uri.
-		
+		//Mongodb Atlas users will have such syntax and won't need to enter separate username and password to the script since it is already in the uri.
+
 		//if host includes starts with mongodb:// or mongodb+srv://, let's use the connection string and don't build new one
-		if(host.indexOf("mongodb://") == 0 || host.indexOf("mongodb+srv://") == 0)
-			return host;
-		String credential = "";
-		if(username != null && !username.isEmpty()) {
-			credential = username+":"+password+"@";
-		}
+		if(url.indexOf("mongodb://") == 0 || url.indexOf("mongodb+srv://") == 0)
+			return url;
+		
 
-		String uri = "mongodb://"+credential+host;
+		String uri = "mongodb://"+url;
 
-		logger.info("uri:{}",uri);
+		logger.info("url:{}",uri);
 
 		return uri;
 	}
+
 
 	/*
 	 * (non-Javadoc)
@@ -178,21 +224,25 @@ public class MongoStore extends DataStore {
 	 */
 	@Override
 	public String save(Broadcast broadcast) {
-		if (broadcast == null) {
-			return null;
-		}
-		try {
-			Broadcast updatedBroadcast = super.saveBroadcast(broadcast);
-			String streamId = updatedBroadcast.getStreamId();
 
-			synchronized(this) {
-				datastore.save(broadcast);
+		long startTime = System.nanoTime();
+		String streamId = null;
+		if (broadcast != null) 
+		{		
+			try {
+				Broadcast updatedBroadcast = super.saveBroadcast(broadcast);
+				synchronized(broadcastLock) {
+					datastore.save(broadcast);
+					String cacheKey = getBroadcastCacheKey(broadcast.getStreamId());
+					getBroadcastCache().put(cacheKey, broadcast);
+				}
+				streamId = updatedBroadcast.getStreamId();
+			} catch (Exception e) {
+				logger.error(ExceptionUtils.getStackTrace(e));
 			}
-			return streamId;
-		} catch (Exception e) {
-			logger.error(ExceptionUtils.getStackTrace(e));
 		}
-		return null;
+		recordQueryDuration(startTime, "save");
+		return streamId;
 	}
 
 	/*
@@ -202,26 +252,41 @@ public class MongoStore extends DataStore {
 	 */
 	@Override
 	public Broadcast get(String id) {
-		synchronized(this) {
-			try {
-				return datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id)).first();
-			} catch (Exception e) {
-				logger.error(ExceptionUtils.getStackTrace(e));
+		long startTime = System.nanoTime();
+		
+		String cacheKey = getBroadcastCacheKey(id);
+		Broadcast broadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
+		if(broadcast == null){
+			synchronized(broadcastLock) {
+				try {
+					broadcast = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id)).first();
+					getBroadcastCache().put(cacheKey, broadcast);
+
+				} catch (Exception e) {
+					logger.error(ExceptionUtils.getStackTrace(e));
+				}
 			}
 		}
-		return null;
+
+		recordQueryDuration(startTime, "get");
+		return broadcast;
 	}
-	
+
 	@Override
 	public VoD getVoD(String id) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		VoD vod = null;
+		synchronized(vodLock) {
 			try {
-				return vodDatastore.find(VoD.class).filter(Filters.eq(VOD_ID,id)).first();
+
+				vod = vodDatastore.find(VoD.class).filter(Filters.eq(VOD_ID,id)).first();
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return null;
+		recordQueryDuration(startTime, "getVoD");
+		return vod;
 	}
 	/*
 	 * (non-Javadoc)
@@ -231,52 +296,91 @@ public class MongoStore extends DataStore {
 	 */
 	@Override
 	public boolean updateStatus(String id, String status) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+
+		synchronized(broadcastLock) {
 			try {
+
+				String cacheKey = getBroadcastCacheKey(id);
+				Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
 				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id));
 
 				Update<Broadcast> ops = query.update(set(STATUS, status));
 
-				if(status.equals(IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING)) 
-				{
-					ops.add(set(START_TIME, System.currentTimeMillis()));
+				if(cachedBroadcast != null) {
+					cachedBroadcast.setStatus(status);
+					cachedBroadcast.setUpdateTime(System.currentTimeMillis());
 				}
-				else if(status.equals(IAntMediaStreamHandler.BROADCAST_STATUS_FINISHED)) 
+
+				long now = System.currentTimeMillis();
+				if(status.equals(IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING))
+				{
+
+					ops.add(set(START_TIME, now));
+
+					if(cachedBroadcast != null) {
+						cachedBroadcast.setStartTime(now);
+					}
+				}
+				else if(status.equals(IAntMediaStreamHandler.BROADCAST_STATUS_FINISHED))
 				{
 					ops.add(set(WEBRTC_VIEWER_COUNT, 0));
 					ops.add(set(HLS_VIEWER_COUNT, 0));
 					ops.add(set(RTMP_VIEWER_COUNT, 0));
 					ops.add(set(DASH_VIEWER_COUNT, 0));
+
+					if(cachedBroadcast != null) {
+						cachedBroadcast.setWebRTCViewerCount(0);
+						cachedBroadcast.setHlsViewerCount(0);
+						cachedBroadcast.setRtmpViewerCount(0);
+						cachedBroadcast.setDashViewerCount(0);
+					}
+				}
+
+				ops.add(set(UPDATE_TIME_FIELD, now));
+
+				UpdateResult update = ops.execute();
+				result = update.getMatchedCount() == 1;
+
+			} catch (Exception e) {
+				logger.error(ExceptionUtils.getStackTrace(e));
+			}
+		}
+		recordQueryDuration(startTime, "updateStatus");
+		return result;
+
+	}
+
+	@Override
+	public boolean updateVoDProcessStatus(String id, String status) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized (vodLock) {
+			try {
+
+				Query<VoD> query = vodDatastore.find(VoD.class).filter(Filters.eq(VOD_ID, id));
+				Update<VoD> ops = query.update(set("processStatus", status));
+				if (VoD.PROCESS_STATUS_PROCESSING.equals(status)) 
+				{
+					ops.add(set("processStartTime", System.currentTimeMillis()));
+				}
+				else if (VoD.PROCESS_STATUS_FAILED.equals(status) || VoD.PROCESS_STATUS_FINISHED.equals(status)) 
+				{
+					ops.add(set("processEndTime", System.currentTimeMillis()));
 				}
 
 				UpdateResult update = ops.execute();
-				return update.getMatchedCount() == 1;
+				result = update.getMatchedCount() == 1;
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return false;
-
+		recordQueryDuration(startTime, "updateVoDProcessStatus");
+		return result;
 	}
 
-	/*
-	 * (non-Javadoc)
-	 * 
-	 * @see io.antmedia.datastore.db.IDataStore#updateDuration(java.lang.String,
-	 * long)
-	 */
-	@Override
-	public boolean updateDuration(String id, long duration) {
-		synchronized(this) {
-			try {
-				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id));
-				return query.update(set(DURATION, duration)).execute().getMatchedCount() == 1;
-			} catch (Exception e) {
-				logger.error(ExceptionUtils.getStackTrace(e));
-			}
-		}
-		return false;
-	}
 
 	/*
 	 * (non-Javadoc)
@@ -286,58 +390,100 @@ public class MongoStore extends DataStore {
 	 */
 	@Override
 	public boolean addEndpoint(String id, Endpoint endpoint) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(broadcastLock) {
+			String cacheKey = getBroadcastCacheKey(id);
+			Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
 			if (id != null && endpoint != null) {
 				try {
+
+					if(cachedBroadcast != null) {
+						List<Endpoint> endPointList = cachedBroadcast.getEndPointList();
+						if (endPointList == null) {
+							endPointList = new ArrayList<>();
+						}
+						endPointList.add(endpoint);
+						cachedBroadcast.setEndPointList(endPointList);
+					}
 					Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id));
 
-					return query.update(UpdateOperators.push("endPointList", endpoint)).execute().getMatchedCount() == 1;
+					result = query.update(UpdateOperators.push("endPointList", endpoint)).execute().getMatchedCount() == 1;
+
 				} catch (Exception e) {
 					logger.error(ExceptionUtils.getStackTrace(e));
 				}
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "addEndpoint");
+		return result;
 	}
 
 	@Override
 	public boolean removeEndpoint(String id, Endpoint endpoint, boolean checkRTMPUrl) {
+		long startTime = System.nanoTime();
+
 		boolean result = false;
-		synchronized(this) {
-			if (id != null && endpoint != null) 
+		synchronized(broadcastLock) {
+			String cacheKey = getBroadcastCacheKey(id);
+			Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
+			if (id != null && endpoint != null)
 			{
+				if(cachedBroadcast != null)
+				{
+					List<Endpoint> endPointList = cachedBroadcast.getEndPointList();
+					if (endPointList != null && !endPointList.isEmpty()) {
+						for (Iterator<Endpoint> iterator = endPointList.iterator(); iterator.hasNext();) {
+							Endpoint endpointItem = iterator.next();
+							if(checkRTMPUrl) {
+								if (endpointItem.getEndpointUrl().equals(endpoint.getEndpointUrl())) {
+									iterator.remove();
+									result = true;
+									break;
+								}
+							}
+							else if (endpointItem.getEndpointServiceId().equals(endpoint.getEndpointServiceId())) {
+								iterator.remove();
+								result = true;
+								break;
+							}
+						}
+					}
+				}
+
 				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id));
 
 				Update<Broadcast> update = query.update(UpdateOperators.pullAll("endPointList", Arrays.asList(endpoint)));
 
-				return update.execute().getMatchedCount() == 1;
+				result = update.execute().getModifiedCount() == 1;
 			}
 		}
+		recordQueryDuration(startTime, "removeEndpoint");
 		return result;
 	}
 
 	@Override
 	public boolean removeAllEndpoints(String id) {
+		long startTime = System.nanoTime();
+
 		boolean result = false;
-		synchronized(this) {
+		synchronized(broadcastLock) {
+			String cacheKey = getBroadcastCacheKey(id);
+			Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
 			if (id != null) {
+
+				if(cachedBroadcast != null) {
+					cachedBroadcast.setEndPointList(null);
+				}
 				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id));
-				return query.update(UpdateOperators.unset("endPointList")).execute().getMatchedCount() == 1;
+				result = query.update(UpdateOperators.unset("endPointList")).execute().getMatchedCount() == 1;
 			}
 		}
+		recordQueryDuration(startTime, "removeAllEndpoints");
 		return result;
-	}
-
-	/*
-	 * (non-Javadoc)
-	 * 
-	 * @see io.antmedia.datastore.db.IDataStore#getBroadcastCount()
-	 */
-	@Override
-	public long getBroadcastCount() {
-		synchronized(this) {
-			return datastore.find(Broadcast.class).count();
-		}
 	}
 
 
@@ -348,15 +494,24 @@ public class MongoStore extends DataStore {
 	 */
 	@Override
 	public boolean delete(String id) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(broadcastLock) {
 			try {
 				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id));
-				return query.delete().getDeletedCount() == 1;
+				result = query.delete().getDeletedCount() == 1;
+				
+				if(result){
+					String cacheKey = getBroadcastCacheKey(id);
+					getBroadcastCache().evictIfPresent(cacheKey);
+				}
+				
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "delete");
+		return result;
 	}
 
 	private boolean checkIfRegexValid(String regex) {
@@ -369,11 +524,41 @@ public class MongoStore extends DataStore {
 		}
 	}
 
+	@Override
+	public List<ConnectionEvent> getConnectionEvents(String streamId, String subscriberId, int offset, int size) {
+		long startTime = System.nanoTime();
+
+		List<ConnectionEvent> connectionEvents = new ArrayList<>();
+		synchronized(subscriberLock) {
+			try {
+
+				Query<ConnectionEvent> query = subscriberDatastore.find(ConnectionEvent.class)
+						.filter(Filters.eq(STREAM_ID, streamId));
+
+
+				if (StringUtils.isNotBlank(subscriberId)) {
+					query.filter(Filters.eq(SUBSCRIBER_ID, subscriberId));
+				}
+
+				FindOptions findingOptions = new FindOptions().skip(offset).limit(size);
+
+				connectionEvents = query.iterator(findingOptions).toList();
+			} catch (Exception e) {
+				logger.error(ExceptionUtils.getStackTrace(e));
+			}
+		}
+		recordQueryDuration(startTime, "getConnectionEvents");
+		return connectionEvents;
+	}
+
 
 	@Override
 	public List<Broadcast> getBroadcastList(int offset, int size, String type, String sortBy, String orderBy, String search) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		List<Broadcast> broadcastList = Arrays.asList();
+		synchronized(broadcastLock) {
 			try {
+
 				Query<Broadcast> query = datastore.find(Broadcast.class);
 				datastore.ensureIndexes();
 
@@ -398,24 +583,25 @@ public class MongoStore extends DataStore {
 								Filters.regex(STREAM_ID).caseInsensitive().pattern(".*" + search + ".*"),
 								Filters.regex("name").caseInsensitive().pattern(".*" + search + ".*")
 								)
-						);
+								);
 					}
-					
-					
-					
+
+
+
 				}
 
 				if(type != null && !type.isEmpty()) {
 					query.filter(Filters.eq("type", type));
 				}
 
-				return query.iterator(findingOptions).toList();
+				broadcastList = query.iterator(findingOptions).toList();
 
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return null;
+		recordQueryDuration(startTime, "getBroadcastList");
+		return broadcastList;
 	}
 
 	public Datastore getDataStore() {
@@ -425,57 +611,83 @@ public class MongoStore extends DataStore {
 
 	@Override
 	public List<Broadcast> getExternalStreamsList() {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		List<Broadcast> streamList = Arrays.asList();
+		long now = System.currentTimeMillis();
+		synchronized(broadcastLock) {
 			try {
+
 				Query<Broadcast> query = datastore.find(Broadcast.class);
 
 				query.filter(
 						Filters.and(
 								Filters.or(Filters.eq("type", AntMediaApplicationAdapter.IP_CAMERA), Filters.eq("type", AntMediaApplicationAdapter.STREAM_SOURCE)),
-						Filters.and(Filters.ne(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_PREPARING), Filters.ne(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING)))
+								Filters.and(Filters.ne(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_PREPARING), Filters.ne(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING)))
 						);
 
-				List<Broadcast> streamList = query.iterator().toList();
-				final UpdateResult results = query.update(new UpdateOptions().multi(true), set(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_PREPARING));
+				streamList = query.iterator().toList();
+				final UpdateResult results = query.update(new UpdateOptions().multi(true), 
+						set(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_PREPARING),
+						set(UPDATE_TIME_FIELD, now));
 				long updatedCount = results.getModifiedCount();
 				if(updatedCount != streamList.size()) {
 					logger.error("Only {} stream status updated out of {}", updatedCount, streamList.size());
 				}
-				return streamList;
 			} catch (Exception e) {
 
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return null;
+		recordQueryDuration(startTime, "getExternalStreamsList");
+		return streamList;
 	}
 
 	@Override
 	public void close(boolean deleteDB) {
-		synchronized(this) {
-			available = false;
-			if (deleteDB) {
-				mongoClient.getDatabase(tokenDatastore.getDatabase().getName()).drop();
-				mongoClient.getDatabase(subscriberDatastore.getDatabase().getName()).drop();
-				mongoClient.getDatabase(datastore.getDatabase().getName()).drop();
-				mongoClient.getDatabase(vodDatastore.getDatabase().getName()).drop();
-				mongoClient.getDatabase(detectionMap.getDatabase().getName()).drop();
-				mongoClient.getDatabase(conferenceRoomDatastore.getDatabase().getName()).drop();
+		long startTime = System.nanoTime();
+
+		synchronized(broadcastLock) {
+			synchronized(vodLock) {
+				synchronized(tokenLock) {
+					synchronized(subscriberLock) {
+						synchronized(detectionLock) {
+							synchronized(roomLock) {
+								available = false;
+								if (deleteDB) {
+									mongoClient.getDatabase(tokenDatastore.getDatabase().getName()).drop();
+									mongoClient.getDatabase(subscriberDatastore.getDatabase().getName()).drop();
+									mongoClient.getDatabase(datastore.getDatabase().getName()).drop();
+									mongoClient.getDatabase(vodDatastore.getDatabase().getName()).drop();
+									mongoClient.getDatabase(detectionMap.getDatabase().getName()).drop();
+									mongoClient.getDatabase(conferenceRoomDatastore.getDatabase().getName()).drop();
+								}
+								mongoClient.close();
+							}
+						}
+					}
+				}
 			}
-			mongoClient.close();
 		}
+		recordQueryDuration(startTime, "close");
 	}
 
 	@Override
 	public String addVod(VoD vod) {
+		long startTime = System.nanoTime();
+
 
 		String id = null;
 		boolean result = false;
-		synchronized(this) {
+		synchronized(vodLock) {
 			try {	
 				if (vod.getVodId() == null) {
 					vod.setVodId(RandomStringUtils.randomAlphanumeric(12) + System.currentTimeMillis());
 				}
+				else {
+					//replace the existing record with the same vodId (e.g. a processing placeholder) like map based stores do
+					vodDatastore.find(VoD.class).filter(Filters.eq(VOD_ID, vod.getVodId())).delete(new DeleteOptions().multi(true));
+				}
+
 				vodDatastore.save(vod);
 				result = true;
 			} catch (Exception e) {
@@ -486,13 +698,18 @@ public class MongoStore extends DataStore {
 				id = vod.getVodId();
 			}
 		}
+		recordQueryDuration(startTime, "addVod");
 		return id;
 
 	}
 
 	@Override
 	public List<VoD> getVodList(int offset, int size, String sortBy, String orderBy, String filterStreamId, String search) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+
+		List<VoD>  vodList = Arrays.asList();
+		synchronized(vodLock) {
+
 			Query<VoD> query = vodDatastore.find(VoD.class);
 
 			if (filterStreamId != null && !filterStreamId.isEmpty()) {
@@ -513,53 +730,71 @@ public class MongoStore extends DataStore {
 			if(search != null && !search.isEmpty())
 			{
 				logger.info("Server side search is called for VoD, searchString =  {}", search);
-				
+
 				query.filter(Filters.or(
 						Filters.regex(STREAM_ID).caseInsensitive().pattern(".*" + search + ".*"),
 						Filters.regex("streamName").caseInsensitive().pattern(".*" + search + ".*"),
 						Filters.regex(VOD_ID).caseInsensitive().pattern(".*" + search + ".*"),
-						Filters.regex("vodName").caseInsensitive().pattern(".*" + search + ".*")
+						Filters.regex("vodName").caseInsensitive().pattern(".*" + search + ".*"),
+						Filters.regex("description").caseInsensitive().pattern(".*" + search + ".*"),
+						Filters.regex("metadata").caseInsensitive().pattern(".*" + search + ".*")
 						)
-			    );
+						);
 
 			}
-			return query.iterator(findOptions).toList();
+			vodList = query.iterator(findOptions).toList();
 		}
+		
+		recordQueryDuration(startTime, "getVodList");
+
+		return vodList;
 	}
 
 
 	@Override
 	public boolean deleteVod(String id) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(vodLock) {
 			try {
 				Query<VoD> query = vodDatastore.find(VoD.class).filter(Filters.eq(VOD_ID, id));
-				return query.delete().getDeletedCount() == 1;
+				result = query.delete().getDeletedCount() == 1;
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "deleteVod");
+		return result;
 	}
 
 
 
 	@Override
 	public long getTotalVodNumber() {
-		synchronized(this) {
-			return vodDatastore.find(VoD.class).count();
+		long startTime = System.nanoTime();
+		long totalVodNumber = 0;
+		synchronized(vodLock) {
+
+			totalVodNumber = vodDatastore.find(VoD.class).count();
 		}
+		recordQueryDuration(startTime, "getTotalVodNumber");
+		return totalVodNumber;
 	}
 
 	@Override
 	public int fetchUserVodList(File userfile) {
+
+		long startTime = System.nanoTime();
+
 
 		if(userfile==null) {
 			return 0;
 		}
 
 		int numberOfSavedFiles = 0;
-		synchronized(this) {
+		synchronized(vodLock) {
 			try {
+
 				vodDatastore.find(VoD.class).filter(Filters.eq("type", "userVod")).delete(new DeleteOptions().multi(true));
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
@@ -597,43 +832,32 @@ public class MongoStore extends DataStore {
 				}
 			}
 		}
+		recordQueryDuration(startTime, "fetchUserVodList");
 		return numberOfSavedFiles;
 
 	}
 
 
-
-
-	@Override
-	public boolean updateSourceQualityParametersLocal(String id, String quality, double speed, int pendingPacketQueue) {
-		synchronized(this) {
-			try {
-				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, id));
-				List<UpdateOperator> updateOperators = new ArrayList<>();
-				updateOperators.add(set("speed", speed));
-				updateOperators.add(set("pendingPacketSize", pendingPacketQueue));
-
-				if (quality != null) {
-					updateOperators.add(set("quality", quality));
-				}
-				return query.update(updateOperators).execute().getModifiedCount() == 1;
-			} catch (Exception e) {
-				logger.error(ExceptionUtils.getStackTrace(e));
-			}
-		}
-		return false;
-	}
-
 	@Override
 	public long getTotalBroadcastNumber() {
-		synchronized(this) {
-			return datastore.find(Broadcast.class).count();
+		long startTime = System.nanoTime();
+		long totalBroadcastNumber = 0;
+		synchronized(broadcastLock) {
+
+			totalBroadcastNumber = datastore.find(Broadcast.class).count();
 		}
+
+		recordQueryDuration(startTime, "getTotalBroadcastNumber");
+		return totalBroadcastNumber;
 	}
 
 	@Override
 	public long getPartialBroadcastNumber(String search){
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		long partialBroadcastNumber = 0;
+
+		synchronized(broadcastLock) {
+
 			Query<Broadcast> query = datastore.find(Broadcast.class);
 			if (search != null && !search.isEmpty()) 
 			{
@@ -642,30 +866,42 @@ public class MongoStore extends DataStore {
 						Filters.regex("streamId").caseInsensitive().pattern(".*" + search + ".*"),
 						Filters.regex("name").caseInsensitive().pattern(".*" + search + ".*")
 						)
-			    );
+						);
 			}
 
-			return query.count();
+			partialBroadcastNumber = query.count();
 		}
+		
+		recordQueryDuration(startTime, "getPartialBroadcastNumber");
+
+		return partialBroadcastNumber;
 	}
 
 	@Override
 	public long getPartialVodNumber(String search)
 	{
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		long partialVodNumber = 0;
+		synchronized(vodLock) {
+
 			Query<VoD> query = vodDatastore.find(VoD.class);
-			if (search != null && !search.isEmpty()) 
+			if (search != null && !search.isEmpty())
 			{
 				logger.info("Server side search is called for {}", search);
 				query.filter(Filters.or(
 						Filters.regex("streamId").caseInsensitive().pattern(".*" + search + ".*"),
 						Filters.regex("streamName").caseInsensitive().pattern(".*" + search + ".*"),
 						Filters.regex(VOD_ID).caseInsensitive().pattern(".*" + search + ".*"),
-						Filters.regex("vodName").caseInsensitive().pattern(".*" + search + ".*")
+						Filters.regex("vodName").caseInsensitive().pattern(".*" + search + ".*"),
+						Filters.regex("description").caseInsensitive().pattern(".*" + search + ".*"),
+						Filters.regex("metadata").caseInsensitive().pattern(".*" + search + ".*")
 						));
 			}
-			return query.count();
+			partialVodNumber = query.count();
 		}
+
+		recordQueryDuration(startTime, "getPartialVodNumber");
+		return partialVodNumber;
 	}
 
 	public Datastore getVodDatastore() {
@@ -677,68 +913,43 @@ public class MongoStore extends DataStore {
 	}
 
 	@Override
-	public long getActiveBroadcastCount() {
-		synchronized(this) {
-			return datastore.find(Broadcast.class).filter(Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING)).count();
+	public long getActiveBroadcastCount() 
+	{
+		long startTime = System.nanoTime();
+
+		long activeBroadcastCount = 0;
+		synchronized(broadcastLock) {			
+			LogicalFilter andFilter = Filters.and(Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING));
+
+			//check their updateTime field
+			long activeIntervalValue = System.currentTimeMillis() - (2 * MuxAdaptor.STAT_UPDATE_PERIOD_MS);
+			andFilter.add(Filters.gte(UPDATE_TIME_FIELD, activeIntervalValue));
+
+
+
+			activeBroadcastCount = datastore.find(Broadcast.class).filter(andFilter).count();
 		}
+		
+		recordQueryDuration(startTime, "getActiveBroadcastCount");
+
+		return activeBroadcastCount;
 	}
 
 	@Override
-	public void saveDetection(String id, long timeElapsed, List<TensorFlowObject> detectedObjects) {
-		synchronized(this) {
-			if (detectedObjects != null) {
-				for (TensorFlowObject tensorFlowObject : detectedObjects) {
-					tensorFlowObject.setDetectionTime(timeElapsed);
-					tensorFlowObject.setImageId(id);
-					detectionMap.save(tensorFlowObject);
-				}
-			}
-		}
-	}
-
-	@Override
-	public List<TensorFlowObject> getDetectionList(String idFilter, int offsetSize, int batchSize) {
-		synchronized(this) {
-			try {
-				if (batchSize > MAX_ITEM_IN_ONE_LIST) {
-					batchSize = MAX_ITEM_IN_ONE_LIST;
-				}
-				return detectionMap.find(TensorFlowObject.class).iterator(new FindOptions().skip(offsetSize).limit(batchSize)).toList();
-			} catch (Exception e) {
-				logger.error(e.getMessage());
-			}
-		}
-		return null;	
-	}
-
-	@Override
-	public List<TensorFlowObject> getDetection(String id) {
-		synchronized(this) {
-			try {
-				return detectionMap.find(TensorFlowObject.class).filter(Filters.eq(IMAGE_ID, id)).iterator().toList();
-			} catch (Exception e) {
-				logger.error(e.getMessage());
-			}
-		}
-		return null;	
-	}
-
-	@Override
-	public long getObjectDetectedTotal(String id) {
-		synchronized(this) {
-			return detectionMap.find(TensorFlowObject.class).filter(Filters.eq(IMAGE_ID, id)).count();
-		}
-	}
-
-
-
-	@Override
-	public boolean updateBroadcastFields(String streamId, Broadcast broadcast) {
+	public boolean updateBroadcastFields(String streamId, BroadcastUpdate broadcast) {
+		long startTime = System.nanoTime();
 		boolean result = false;
-		synchronized(this) {
+		synchronized(broadcastLock) {
 			try {
+				String cacheKey = getBroadcastCacheKey(streamId);
+				Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
 				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, streamId));
 
+				if(cachedBroadcast != null) {
+					updateStreamInfo(cachedBroadcast, broadcast);
+				}
+				
 				List<UpdateOperator> updates = new ArrayList<>();
 
 				if (broadcast.getName() != null) {
@@ -761,7 +972,7 @@ public class MongoStore extends DataStore {
 					updates.add(set("ipAddr", broadcast.getIpAddr()));
 				}
 
-				if ( broadcast.getStreamUrl() != null) {
+				if (broadcast.getStreamUrl() != null) {
 					updates.add(set("streamUrl", broadcast.getStreamUrl()));
 				}
 
@@ -796,56 +1007,121 @@ public class MongoStore extends DataStore {
 				if (broadcast.getSubFolder() != null) {
 					updates.add(set("subFolder", broadcast.getSubFolder()));
 				}
-				
+
+				if (broadcast.getSrtPassphraseOverride() != null) {
+					updates.add(set("srtPassphraseOverride", broadcast.getSrtPassphraseOverride()));
+				}
+
 				if (broadcast.getListenerHookURL() != null && !broadcast.getListenerHookURL().isEmpty()) {
 					updates.add(set("listenerHookURL", broadcast.getListenerHookURL()));
 				}
-				if (broadcast.getSpeed() != 0) {
+
+				if (broadcast.getSpeed() != null) {
 					updates.add(set("speed", broadcast.getSpeed()));
 				}
 
 				if(broadcast.getEncoderSettingsList() != null){
 					updates.add(set("encoderSettingsList",broadcast.getEncoderSettingsList()));
 				}
-				
-				if (broadcast.getConferenceMode() != null) {
-					updates.add(set("conferenceMode", broadcast.getConferenceMode()));
+
+				if (broadcast.getPlannedStartDate() != null) {
+					updates.add(set("plannedStartDate", broadcast.getPlannedStartDate()));
+				}
+
+				if (broadcast.getSeekTimeInMs() != null) {
+					updates.add(set("seekTimeInMs", broadcast.getSeekTimeInMs()));
+				}
+
+				if (broadcast.getReceivedBytes() != null) {
+					updates.add(set("receivedBytes", broadcast.getReceivedBytes()));
+				}
+
+				if (broadcast.getBitrate() != null) {
+					updates.add(set("bitrate", broadcast.getBitrate()));
+				}
+
+				if (broadcast.getUserAgent() != null) {
+					updates.add(set("userAgent", broadcast.getUserAgent()));
+				}
+
+				if (broadcast.getWebRTCViewerLimit() != null) {
+					updates.add(set("webRTCViewerLimit", broadcast.getWebRTCViewerLimit()));
 				}
 				
+				if (broadcast.getWebRTCViewerCount() != null) {
+					updates.add(set(WEBRTC_VIEWER_COUNT, broadcast.getWebRTCViewerCount()));
+				}
 
-				prepareFields(broadcast, updates);
+				if (broadcast.getHlsViewerLimit() != null) {
+					updates.add(set("hlsViewerLimit", broadcast.getHlsViewerLimit()));
+				}
 
-				updates.add(set("plannedStartDate", broadcast.getPlannedStartDate()));
-				updates.add(set("seekTimeInMs", broadcast.getSeekTimeInMs()));
-				updates.add(set("currentPlayIndex", broadcast.getCurrentPlayIndex()));
-				updates.add(set("receivedBytes", broadcast.getReceivedBytes()));
-				updates.add(set("bitrate", broadcast.getBitrate()));
-				updates.add(set("userAgent", broadcast.getUserAgent()));
-				updates.add(set("webRTCViewerLimit", broadcast.getWebRTCViewerLimit()));
-				updates.add(set("hlsViewerLimit", broadcast.getHlsViewerLimit()));
-				updates.add(set("dashViewerLimit", broadcast.getDashViewerLimit()));
-				updates.add(set("subTrackStreamIds", broadcast.getSubTrackStreamIds()));
-				updates.add(set(META_DATA, broadcast.getMetaData()));
-				updates.add(set("playlistLoopEnabled", broadcast.isPlaylistLoopEnabled()));
-				updates.add(set("updateTime", broadcast.getUpdateTime()));
-				updates.add(set("autoStartStopEnabled",broadcast.isAutoStartStopEnabled()));
+				if (broadcast.getDashViewerLimit() != null) {
+					updates.add(set("dashViewerLimit", broadcast.getDashViewerLimit()));
+				}
+
+				if (broadcast.getMetaData() != null) {
+					updates.add(set(META_DATA, broadcast.getMetaData()));
+				}
+
+				if (broadcast.getUpdateTime() != null && broadcast.getUpdateTime() > 0) {
+					updates.add(set(UPDATE_TIME_FIELD, broadcast.getUpdateTime()));
+				}
+
+				if (broadcast.getSubtracksLimit() != null) {
+					updates.add(set("subtracksLimit", broadcast.getSubtracksLimit()));
+				}
+
+				if (broadcast.getCurrentPlayIndex() != null) {
+					updates.add(set("currentPlayIndex", broadcast.getCurrentPlayIndex()));
+				}
+
+				if (broadcast.getPlaylistLoopEnabled() != null) {
+					updates.add(set("playlistLoopEnabled", broadcast.getPlaylistLoopEnabled()));
+				}
+
+				if (broadcast.getAutoStartStopEnabled() != null) {
+					updates.add(set("autoStartStopEnabled", broadcast.getAutoStartStopEnabled()));
+				}
+
+				if (broadcast.getPendingPacketSize() != null) {
+					updates.add(set("pendingPacketSize", broadcast.getPendingPacketSize()));
+				}
+
+				if (broadcast.getPlannedEndDate() != null) {
+					updates.add(set("plannedEndDate", broadcast.getPlannedEndDate()));
+				}
+
+				if (broadcast.getRole() != null) {
+					updates.add(set(ROLE, broadcast.getRole()));
+				}
+
+				if (broadcast.getQuality() != null) {
+					updates.add(set("quality", broadcast.getQuality()));
+				}
+
+
+				prepareFields(broadcast, updates, cachedBroadcast);
 
 				UpdateResult updateResult = query.update(updates).execute();
-				return updateResult.getModifiedCount() == 1;
+
+				result = updateResult.getModifiedCount() == 1;
+
 			} catch (Exception e) {
 				logger.error(e.getMessage());
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "updateBroadcastFields");
+		return result;
 	}
 
-	private void prepareFields(Broadcast broadcast, List<UpdateOperator> updates) {
+	private void prepareFields(BroadcastUpdate broadcast, List<UpdateOperator> updates, Broadcast cachedBroadcast) {
 
-		if ( broadcast.getDuration() != 0) {
+		if ( broadcast.getDuration() != null) {
 			updates.add(set(DURATION, broadcast.getDuration()));
 		}
 
-		if (broadcast.getStartTime() != 0) {
+		if (broadcast.getStartTime() != null) {
 			updates.add(set(START_TIME, broadcast.getStartTime()));
 		}
 
@@ -857,8 +1133,56 @@ public class MongoStore extends DataStore {
 			updates.add(set(STATUS, broadcast.getStatus()));
 		}
 
-		if (broadcast.getAbsoluteStartTimeMs() != 0) {
+		if (broadcast.getAbsoluteStartTimeMs() != null) {
 			updates.add(set("absoluteStartTimeMs", broadcast.getAbsoluteStartTimeMs()));
+		}
+		
+		if (broadcast.getWidth() != null) {
+			updates.add(set("width", broadcast.getWidth()));
+		}
+		
+		if (broadcast.getHeight() != null) {
+			updates.add(set("height", broadcast.getHeight()));
+		}
+		
+		if (broadcast.getEncoderQueueSize() != null) {
+			updates.add(set("encoderQueueSize", broadcast.getEncoderQueueSize()));
+		}
+		
+		if (broadcast.getDropPacketCountInIngestion() != null) {
+			updates.add(set("dropPacketCountInIngestion", broadcast.getDropPacketCountInIngestion()));
+		}
+		
+		if (broadcast.getDropFrameCountInEncoding() != null) {
+			updates.add(set("dropFrameCountInEncoding", broadcast.getDropFrameCountInEncoding()));
+		}
+		
+		if (broadcast.getPacketLostRatio() != null) {
+			updates.add(set("packetLostRatio", broadcast.getPacketLostRatio()));
+		}
+		
+		if (broadcast.getJitterMs() != null) {
+			updates.add(set("jitterMs", broadcast.getJitterMs()));
+		}
+		
+		if (broadcast.getRttMs() != null) {
+			updates.add(set("rttMs", broadcast.getRttMs()));
+		}
+		
+		if (broadcast.getPacketsLost() != null) {
+			updates.add(set("packetsLost", broadcast.getPacketsLost()));
+		}
+		
+		if (broadcast.getRemoteIp() != null) {
+			updates.add(set("remoteIp", broadcast.getRemoteIp()));
+		}
+		
+		if (broadcast.getVirtual() != null) {
+			updates.add(set("virtual", broadcast.getVirtual()));
+		}
+		
+		if (broadcast.getMaxIdleTime() != null) {
+			updates.add(set("maxIdleTime", broadcast.getMaxIdleTime()));
 		}
 	}
 
@@ -867,35 +1191,56 @@ public class MongoStore extends DataStore {
 	 */
 	@Override
 	public boolean updateHLSViewerCountLocal(String streamId, int diffCount) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(broadcastLock) {
 			try {
-				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, streamId));
-				UpdateResult result = query.update(inc(HLS_VIEWER_COUNT, diffCount)).execute();
+				String cacheKey = getBroadcastCacheKey(streamId);
+				Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
 
-				return result.getMatchedCount() == 1;
+				if(cachedBroadcast != null) {
+					cachedBroadcast.setHlsViewerCount(cachedBroadcast.getHlsViewerCount() + diffCount);
+				}
+
+				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, streamId));
+				UpdateResult queryResult = query.update(inc(HLS_VIEWER_COUNT, diffCount)).execute();
+
+				result = queryResult.getMatchedCount() == 1;
+
 			} catch (Exception e) {
 				logger.error(e.getMessage());
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "updateHLSViewerCountLocal");
+		return result;
 	}
-	
+
 	/**
 	 * {@inheritDoc}
 	 */
 	@Override
 	public boolean updateDASHViewerCountLocal(String streamId, int diffCount) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(broadcastLock) {
 			try {
-				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, streamId));
-				UpdateResult result = query.update(inc(DASH_VIEWER_COUNT, diffCount)).execute();
+				String cacheKey = getBroadcastCacheKey(streamId);
+				Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
 
-				return result.getMatchedCount() == 1;
+				if(cachedBroadcast != null) {
+					cachedBroadcast.setDashViewerCount(cachedBroadcast.getDashViewerCount() + diffCount);
+				}
+
+				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, streamId));
+				UpdateResult queryResult = query.update(inc(DASH_VIEWER_COUNT, diffCount)).execute();
+				result = queryResult.getMatchedCount() == 1;
+
 			} catch (Exception e) {
 				logger.error(e.getMessage());
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "updateDASHViewerCountLocal");
+		return result;
 	}
 
 	/**
@@ -912,8 +1257,13 @@ public class MongoStore extends DataStore {
 	}
 
 	private boolean updateViewerField(String streamId, boolean increment, String fieldName) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(broadcastLock) {
 			try {
+				String cacheKey = getBroadcastCacheKey(streamId);
+				Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
 				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, streamId));
 
 				if(!increment) {
@@ -928,32 +1278,53 @@ public class MongoStore extends DataStore {
 					updateResult = query.update(UpdateOperators.dec(fieldName)).execute();
 				}
 
-				return updateResult.getModifiedCount() == 1;
+				result = updateResult.getModifiedCount() == 1;
+
+				if(result && cachedBroadcast != null) {
+					if(fieldName.equals(WEBRTC_VIEWER_COUNT)) {
+						cachedBroadcast.setWebRTCViewerCount(cachedBroadcast.getWebRTCViewerCount() + (increment ? 1 : -1));
+					}
+					else if(fieldName.equals(RTMP_VIEWER_COUNT)) {
+						cachedBroadcast.setRtmpViewerCount(cachedBroadcast.getRtmpViewerCount() + (increment ? 1 : -1));
+					}
+				}
+
 			} catch (Exception e) {
 				logger.error(e.getMessage());
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "updateViewerField");
+		return result;
 	}
 
 
 	@Override
 	public void saveStreamInfo(StreamInfo streamInfo) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+
+		synchronized(broadcastLock) {
 			//TODO: Why do we run find(StreamInfo.class)
 			datastore.find(StreamInfo.class);
 			datastore.save(streamInfo);
 		}
+		recordQueryDuration(startTime, "saveStreamInfo");
 	}
 
 	public List<StreamInfo> getStreamInfoList(String streamId) {
-		synchronized(this) {
-			return datastore.find(StreamInfo.class).filter(Filters.eq(STREAM_ID, streamId)).iterator().toList();
+		long startTime = System.nanoTime();
+		List<StreamInfo> streamInfoList = new ArrayList<>();
+		synchronized(broadcastLock) {
+			streamInfoList = datastore.find(StreamInfo.class).filter(Filters.eq(STREAM_ID, streamId)).iterator().toList();
 		}
+		recordQueryDuration(startTime, "getStreamInfoList");
+		return streamInfoList;
 	}
 
 	public void clearStreamInfoList(String streamId) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+
+		synchronized(broadcastLock) {
+
 			Query<StreamInfo> query = datastore.find(StreamInfo.class).filter(Filters.eq(STREAM_ID, streamId));
 			long count = query.count();
 			DeleteResult res = query.delete(new DeleteOptions().multi(true));
@@ -962,15 +1333,20 @@ public class MongoStore extends DataStore {
 				logger.error("{} StreamInfo were deleted out of {} for stream {}",res.getDeletedCount(), count, streamId);
 			}
 		}
+		recordQueryDuration(startTime, "clearStreamInfoList");
 	}
 
 	@Override
 	public boolean saveToken(Token token) {
+		long startTime = System.nanoTime();
+
 		boolean result = false;
-		synchronized(this) {
+		synchronized(tokenLock) {
 			if(token.getStreamId() != null && token.getTokenId() != null) {
 
 				try {
+
+
 					tokenDatastore.save(token);
 					result = true;
 
@@ -979,16 +1355,21 @@ public class MongoStore extends DataStore {
 				}
 			}
 		}
+		recordQueryDuration(startTime, "saveToken");
 
 		return result;
 	}
 
 	@Override
 	public Token validateToken(Token token) {
+		long startTime = System.nanoTime();
+
 		Token fetchedToken = null;
-		synchronized(this) {
+		synchronized(tokenLock) {
 			if (token.getTokenId() != null) 
 			{
+
+
 				Query<Token> query = tokenDatastore.find(Token.class).filter(Filters.eq(TOKEN_ID, token.getTokenId()));
 				fetchedToken = query.first();
 				if (fetchedToken != null 
@@ -1007,49 +1388,91 @@ public class MongoStore extends DataStore {
 						}
 
 					}
-					return fetchedToken;
 
 				}else {
 					fetchedToken = null;
 				}
 			}
 		}
+		recordQueryDuration(startTime, "validateToken");
 		return fetchedToken;
 	}
 
 	@Override
 	public boolean revokeTokens(String streamId) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(tokenLock) {
 			Query<Token> query = tokenDatastore.find(Token.class).filter(Filters.eq(STREAM_ID, streamId));
 			DeleteResult delete = query.delete(new DeleteOptions().multi(true));
 
-			return delete.getDeletedCount() >= 1;
+			result = delete.getDeletedCount() >= 1;
 		}
+		recordQueryDuration(startTime, "revokeTokens");
+		return result;
 	}
 
 	@Override
 	public List<Token> listAllTokens(String streamId, int offset, int size) {
-		synchronized(this) {
-			return 	tokenDatastore.find(Token.class).filter(Filters.eq(STREAM_ID, streamId)).iterator(new FindOptions() .skip(offset).limit(size)).toList();
+		long startTime = System.nanoTime();
+		List<Token> tokenList = new ArrayList<>();
+		synchronized(tokenLock) {
+			tokenList = tokenDatastore.find(Token.class).filter(Filters.eq(STREAM_ID, streamId)).iterator(new FindOptions() .skip(offset).limit(size)).toList();
 		}
+		recordQueryDuration(startTime, "listAllTokens");
+		return tokenList;
 	}
+	
+	@Override
+	public long getConnectedSubscriberCount(String streamId) {
+		long startTime = System.nanoTime();
+		
+		long subscriberCount = 0;
+		synchronized(subscriberLock) {
+			subscriberCount = subscriberDatastore.find(Subscriber.class).filter(
+					 Filters.and(Filters.eq(STREAM_ID, streamId), Filters.eq(CONNECTED, true))).count();
+		}
+		recordQueryDuration(startTime, "getSubscriberCount");
+		return subscriberCount;
+	}
+	
+	@Override
+	public List<Subscriber> getConnectedSubscribers(String streamId, int offset, int size) {
+		long startTime = System.nanoTime();
+		List<Subscriber> subscriberList = new ArrayList<>();
+		synchronized(subscriberLock) {
+			subscriberList = subscriberDatastore.find(Subscriber.class).filter(Filters.and(Filters.eq(STREAM_ID, streamId), Filters.eq(CONNECTED, true))).iterator(new FindOptions().skip(offset).limit(size)).toList();
+		}
+		recordQueryDuration(startTime, "getConnectedSubscribers");
+		return subscriberList;	}
 
 	@Override
 	public List<Subscriber> listAllSubscribers(String streamId, int offset, int size) {
-		synchronized(this) {
-			return 	subscriberDatastore.find(Subscriber.class).filter(Filters.eq(STREAM_ID, streamId)).iterator(new FindOptions().skip(offset).limit(size)).toList();
+		long startTime = System.nanoTime();
+		List<Subscriber> subscriberList = new ArrayList<>();
+		synchronized(subscriberLock) {
+			subscriberList = subscriberDatastore.find(Subscriber.class).filter(Filters.eq(STREAM_ID, streamId)).iterator(new FindOptions().skip(offset).limit(size)).toList();
 		}
+		recordQueryDuration(startTime, "listAllSubscribers");
+		return subscriberList;
 	}
 
 
 	@Override
 	public boolean addSubscriber(String streamId, Subscriber subscriber) {
+		long startTime = System.nanoTime();
+
 		boolean result = false;
 		if (subscriber != null) {
-			synchronized (this) {
+
+			synchronized (subscriberLock) {
 				if (subscriber.getStreamId() != null && subscriber.getSubscriberId() != null) {
 					try {
+
+
 						subscriberDatastore.save(subscriber);
+
+						getSubscriberCache().put(getSubscriberCacheKey(streamId, subscriber.getSubscriberId()), subscriber);
 						result = true;
 					} catch (Exception e) {
 						logger.error(ExceptionUtils.getStackTrace(e));
@@ -1057,40 +1480,93 @@ public class MongoStore extends DataStore {
 				}
 			}
 		}
+		
+		recordQueryDuration(startTime, "addSubscriber");
 
+		return result;
+	}
+
+	@Override
+	protected boolean addConnectionEvent(ConnectionEvent event) {
+		long startTime = System.nanoTime();
+
+		boolean result = false;
+		if (event != null && StringUtils.isNoneBlank(event.getStreamId(), event.getSubscriberId())) {
+
+			try {
+
+				subscriberDatastore.save(event);
+				result = true;
+			}
+			catch (Exception e) {
+				logger.error(ExceptionUtils.getStackTrace(e));
+			}
+		}
+		
+		recordQueryDuration(startTime, "addConnectionEvent");
 		return result;
 	}
 
 	@Override
 	public boolean deleteSubscriber(String streamId, String subscriberId) {
+		long startTime = System.nanoTime();
+
 		boolean result = false;
-		synchronized(this) {
+		synchronized(subscriberLock) {
 			try {
-				Query<Subscriber> query = subscriberDatastore.find(Subscriber.class).filter(Filters.eq(STREAM_ID, streamId), Filters.eq("subscriberId", subscriberId));
+
+
+				Query<Subscriber> query = subscriberDatastore.find(Subscriber.class).filter(Filters.eq(STREAM_ID, streamId), Filters.eq(SUBSCRIBER_ID, subscriberId));
 				result = query.delete().getDeletedCount() == 1;
+				if(result){
+					getSubscriberCache().evictIfPresent(getSubscriberCacheKey(streamId, subscriberId));
+				}
+
+				Query<ConnectionEvent> queryConnectionEvent = subscriberDatastore.find(ConnectionEvent.class).filter(Filters.eq(STREAM_ID, streamId), Filters.eq(SUBSCRIBER_ID, subscriberId));
+				queryConnectionEvent.delete(new DeleteOptions().multi(true));
+
+
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
+		
+		recordQueryDuration(startTime, "deleteSubscriber");
 		return result;
 	}
 
 	@Override
 	public boolean blockSubscriber(String streamId, String subscriberId,
-								   String blockedType, int seconds) {
-		synchronized (this) {
+			String blockedType, int seconds) {
+		long startTime = System.nanoTime();
+
+		boolean result = false;
+		synchronized (subscriberLock) {
 			if (streamId == null || subscriberId == null) {
 				return false;
 			}
 
 			try {
+				long blockedUntilTimestampMs = System.currentTimeMillis() + (seconds * 1000L);
+
+
 				UpdateResult updateResult = subscriberDatastore.find(Subscriber.class)
 						.filter(Filters.eq(STREAM_ID, streamId), Filters.eq("subscriberId", subscriberId))
 						.update(set("blockedType", blockedType),
-								set("blockedUntilUnitTimeStampMs", System.currentTimeMillis() + (seconds * 1000)))
+								set("blockedUntilUnitTimeStampMs", blockedUntilTimestampMs))
 						.execute();
 
 				long matchedCount = updateResult.getMatchedCount();
+				if(matchedCount == 1){
+					String cacheKey = getSubscriberCacheKey(streamId, subscriberId);
+					Subscriber subscriber = getSubscriberCache().get(cacheKey, Subscriber.class);
+					if(subscriber != null && subscriber.getSubscriberId() != null){
+						subscriber.setBlockedType(blockedType);
+						subscriber.setBlockedUntilUnitTimeStampMs(blockedUntilTimestampMs);
+						getSubscriberCache().put(cacheKey, subscriber);
+					}
+
+				}
 				if (matchedCount == 0) 
 				{
 					Subscriber subscriber = new Subscriber();
@@ -1099,56 +1575,124 @@ public class MongoStore extends DataStore {
 					subscriber.setBlockedType(blockedType);
 					subscriber.setBlockedUntilUnitTimeStampMs(System.currentTimeMillis() + (seconds * 1000));
 					subscriberDatastore.save(subscriber);
-					return true;
+					getSubscriberCache().put(getSubscriberCacheKey(streamId, subscriber.getSubscriberId()), subscriber);
+
+
+					result = true;
 				}
 				else {
-					return matchedCount == 1;
+					result = matchedCount == 1;
 				}
 			} catch (Exception e) {
 				logger.error(e.getMessage());
-				return false;
 			}
 		}
+		recordQueryDuration(startTime, "blockSubscriber");
+		return result;
 	}
 
 
 	@Override
 	public boolean revokeSubscribers(String streamId) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(subscriberLock) {
+
+
 			Query<Subscriber> query = subscriberDatastore.find(Subscriber.class).filter(Filters.eq(STREAM_ID, streamId));
 			DeleteResult delete = query.delete(new DeleteOptions().multi(true));
+			getSubscriberCache().clear();
 
-			return delete.getDeletedCount() >= 1;
+			Query<ConnectionEvent> queryConnectionEvents = subscriberDatastore.find(ConnectionEvent.class).filter(Filters.eq(STREAM_ID, streamId));
+			DeleteResult deleteConnectionEvents = queryConnectionEvents.delete(new DeleteOptions().multi(true));
+
+			result = delete.getDeletedCount() >= 1 || deleteConnectionEvents.getDeletedCount() >= 1;
 		}
+		recordQueryDuration(startTime, "revokeSubscribers");
+		return result;
+	}
+
+	public String getSubscriberCacheKey(String streamId, String subscriberId){
+		return streamId + "_" + subscriberId;
+	}
+	
+	public String getBroadcastCacheKey(String streamId){
+		return "key_" + streamId;
 	}
 
 	@Override
 	public Subscriber getSubscriber(String streamId, String subscriberId) {
+		long startTime = System.nanoTime();
+
 		Subscriber subscriber = null;
 		if (subscriberId != null && streamId != null) {
-			synchronized (this) {
+
+			String cacheKey = getSubscriberCacheKey(streamId, subscriberId);
+			Subscriber cachedSubscriber = getSubscriberCache().get(cacheKey, Subscriber.class);
+
+			if (cachedSubscriber != null) 
+			{ 
+				if (StringUtils.isNotBlank(cachedSubscriber.getSubscriberId())) {
+					// Subscriber exists in cache, return directly.
+					return cachedSubscriber;
+				}
+				else {
+					//Empty subscriber
+					return null;
+				}
+			}
+
+			synchronized (subscriberLock) {
 				try {
+
 					subscriber = subscriberDatastore.find(Subscriber.class).filter(Filters.eq(STREAM_ID, streamId), Filters.eq("subscriberId", subscriberId)).first();
+					if(subscriber == null){
+						getSubscriberCache().put(cacheKey, new Subscriber()); //Empty subscriber means that non-existence result is cached.
+					}else{
+						getSubscriberCache().put(cacheKey, subscriber); //Subscriber exists in DB. Cache him.
+					}
+
 				} catch (Exception e) {
 					logger.error(ExceptionUtils.getStackTrace(e));
 				}
 			}
+
 		}
+		recordQueryDuration(startTime, "getSubscriber");
 		return subscriber;
 	}
 
 	@Override
 	public boolean resetSubscribersConnectedStatus() {
-		boolean result = false;
-		synchronized (this) {
-			try {
-				UpdateResult execute = subscriberDatastore.find(Subscriber.class).update(new UpdateOptions().multi(true), set("connected", false));
+		long startTime = System.nanoTime();
 
-				result = execute.getMatchedCount() > 1;
+		boolean result = false;
+		synchronized (subscriberLock) {
+			try {
+
+
+				UpdateResult execute = subscriberDatastore.find(Subscriber.class).update(new UpdateOptions().multi(true), set("connected", false));
+				result = execute.getMatchedCount() >= 1;
+				if(result){
+
+					getSubscriberCache().getNativeCache().asMap().forEach((key, value) -> {
+						if (value instanceof Subscriber) {
+							Subscriber subscriber = (Subscriber) value;
+							if(subscriber.getSubscriberId() != null){
+								subscriber.setConnected(false);
+								getSubscriberCache().put(key, subscriber);
+							}
+
+						}
+					});
+
+				}
+
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
+		recordQueryDuration(startTime, "resetSubscribersConnectedStatus");
 		return result;
 	}	
 
@@ -1163,29 +1707,48 @@ public class MongoStore extends DataStore {
 	}
 
 	private boolean setRecordMuxing(String streamId, int enabled, String field) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean methodResult = false;
+		synchronized(broadcastLock) {
+			String cacheKey = getBroadcastCacheKey(streamId);
+			Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
 			try {
 				if (streamId != null && (enabled == MuxAdaptor.RECORDING_ENABLED_FOR_STREAM || enabled == MuxAdaptor.RECORDING_NO_SET_FOR_STREAM || enabled == MuxAdaptor.RECORDING_DISABLED_FOR_STREAM)) {
+
+					if(cachedBroadcast != null) {
+						if(field.equals("mp4Enabled")) {
+							cachedBroadcast.setMp4Enabled(enabled);
+						}
+						else if(field.equals("webMEnabled")) {
+							cachedBroadcast.setWebMEnabled(enabled);
+						}
+					}
+
 					UpdateResult result = datastore.find(Broadcast.class)
 							.filter(Filters.eq(STREAM_ID, streamId))
 							.update(set(field, enabled))
 							.execute();
-					return result.getMatchedCount() == 1;
+					methodResult = result.getMatchedCount() == 1;
 				}
 			} catch (Exception e) {
 				logger.error(e.getMessage());
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "setRecordMuxing");
+		return methodResult;
 
 	}
 
 	@Override
 	public boolean deleteToken(String tokenId) {
+		long startTime = System.nanoTime();
+
 		boolean result = false;
-		synchronized(this) {
-			try {
-				return tokenDatastore.find(Token.class)
+		synchronized(tokenLock) {
+			try 
+			{
+				result = tokenDatastore.find(Token.class)
 						.filter(Filters.eq(TOKEN_ID, tokenId))
 						.delete()
 						.getDeletedCount() == 1;
@@ -1193,145 +1756,158 @@ public class MongoStore extends DataStore {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
+		recordQueryDuration(startTime, "deleteToken");
 		return result;
 	}
 
 	@Override
 	public Token getToken(String tokenId) {
+		long startTime = System.nanoTime();
+
 		Token token = null;
 
-		synchronized(this) {
+		synchronized(tokenLock) {
 			try {
+
 				token =  tokenDatastore.find(Token.class).filter(Filters.eq(TOKEN_ID,tokenId)).first();
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
+		recordQueryDuration(startTime, "getToken");
 		return token;
 	}
 
 	@Override
 	public long getLocalLiveBroadcastCount(String hostAddress) {
-		synchronized(this) {
-			return datastore.find(Broadcast.class)
-					.filter(Filters.and(
-							Filters.or(
-									Filters.eq(ORIGIN_ADDRESS, hostAddress),
-									Filters.exists(ORIGIN_ADDRESS).not()
-									),
-							Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING)
-							)).count();
+		long startTime = System.nanoTime();
+
+		long liveBroadcastCount = 0;
+		synchronized(broadcastLock) {
+
+
+			//get the number of live broadcasts that are coming from hostAddress
+			LogicalFilter logicalFilter = Filters.and(
+					Filters.or(
+							Filters.eq(ORIGIN_ADDRESS, hostAddress)),
+					Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING));
+
+			//check their updateTime field
+			long activeIntervalValue = System.currentTimeMillis() - (2 * MuxAdaptor.STAT_UPDATE_PERIOD_MS);
+			logicalFilter.add(Filters.gte(UPDATE_TIME_FIELD, activeIntervalValue));
+
+
+			liveBroadcastCount = datastore.find(Broadcast.class)
+					.filter(logicalFilter).count();
 		}
+		
+		recordQueryDuration(startTime, "getLocalLiveBroadcastCount");
+
+		return liveBroadcastCount;
 	}
-	
+
 	@Override
 	public List<Broadcast> getLocalLiveBroadcasts(String hostAddress) 
 	{
-		synchronized(this) {
-			return datastore.find(Broadcast.class)
-					.filter(Filters.and(
-							Filters.or(
-									Filters.eq(ORIGIN_ADDRESS, hostAddress),
-									Filters.exists(ORIGIN_ADDRESS).not()
-									),
-							Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING)
-							)).iterator().toList();
+		long startTime = System.nanoTime();
+		List<Broadcast> broadcastList = new ArrayList<>();
+		synchronized(broadcastLock) {
+
+
+
+			//get the number of live broadcasts that are coming from hostAddress
+			LogicalFilter logicalFilter = Filters.and(
+					Filters.or(
+							Filters.eq(ORIGIN_ADDRESS, hostAddress)),
+					Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING));
+
+			//check their updateTime field
+			long activeIntervalValue = System.currentTimeMillis() - (2 * MuxAdaptor.STAT_UPDATE_PERIOD_MS);
+			logicalFilter.add(Filters.gte(UPDATE_TIME_FIELD, activeIntervalValue));
+
+			broadcastList = datastore.find(Broadcast.class)
+					.filter(logicalFilter).iterator().toList();
 		}
+		
+		recordQueryDuration(startTime, "getLocalLiveBroadcasts");
+
+		return broadcastList;
 	}
 
 	@Override
 	public boolean createP2PConnection(P2PConnection conn) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(broadcastLock) {
 			try {
 				if (conn != null) {
+
+
 					datastore.save(conn);
-					return true;
+					result = true;
 				}
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return false;
+		
+		recordQueryDuration(startTime, "createP2PConnection");
+		return result;
 	}
 
 	@Override
 	public boolean deleteP2PConnection(String streamId) {
-		synchronized(this) {
-			try {
-				return datastore.find(P2PConnection.class)
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(broadcastLock) {
+			try 
+			{
+				result = datastore.find(P2PConnection.class)
 						.filter(Filters.eq(STREAM_ID, streamId))
 						.delete().getDeletedCount() == 1;
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return false;
+		
+		recordQueryDuration(startTime, "deleteP2PConnection");
+		return result;
 	}
 
 	@Override
 	public P2PConnection getP2PConnection(String streamId) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		P2PConnection p2pConnection = null;
+		synchronized(broadcastLock) {
 			try {
-				return datastore.find(P2PConnection.class).filter(Filters.eq(STREAM_ID, streamId)).first();
+
+
+				p2pConnection = datastore.find(P2PConnection.class).filter(Filters.eq(STREAM_ID, streamId)).first();
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return null;
-	}
-
-	@Override
-	public boolean addSubTrack(String mainTrackId, String subTrackId) {
-		synchronized(this) {
-			try {
-				if (subTrackId != null) {
-					return datastore.find(Broadcast.class)
-							.filter(Filters.eq(STREAM_ID, mainTrackId))
-							.update(UpdateOperators.push("subTrackStreamIds", subTrackId))
-							.execute()
-							.getMatchedCount() == 1;
-				}
-
-			} catch (Exception e) {
-				logger.error(ExceptionUtils.getStackTrace(e));
-			}
-		}
-		return false;
-	}
-
-	@Override
-	public boolean removeSubTrack(String mainTrackId, String subTrackId) {
-		synchronized(this) {
-			try {
-				if (subTrackId != null) {
-					return datastore.find(Broadcast.class)
-							.filter(Filters.eq(STREAM_ID, mainTrackId))
-							.update(UpdateOperators.pullAll("subTrackStreamIds", Arrays.asList(subTrackId)))
-							.execute()
-							.getMatchedCount() == 1;
-				}
-
-			} catch (Exception e) {
-				logger.error(ExceptionUtils.getStackTrace(e));
-			}
-		}
-		return false;
+		
+		recordQueryDuration(startTime, "getP2PConnection");
+		return p2pConnection;
 	}
 
 	@Override
 	public int resetBroadcasts(String hostAddress) 
 	{
+		long startTime = System.nanoTime();
+
 		int totalOperationCount = 0;
-		synchronized(this) {
+		synchronized(broadcastLock) {
 
 			//delete zombi streams that are belong to origin address
 			totalOperationCount += datastore.find(Broadcast.class)
 					.filter(Filters.and(
-								Filters.or(
+							Filters.or(
 									Filters.eq(ORIGIN_ADDRESS, hostAddress),
 									Filters.exists(ORIGIN_ADDRESS).not()
 									),
-								Filters.eq("zombi", true)
+							Filters.eq("zombi", true)
 							))
 					.delete(new DeleteOptions().multi(true))
 					.getDeletedCount();
@@ -1341,9 +1917,9 @@ public class MongoStore extends DataStore {
 			//reset the broadcasts viewer numbers
 			totalOperationCount += datastore.find(Broadcast.class)
 					.filter(Filters.or(
-								Filters.eq(ORIGIN_ADDRESS, hostAddress),
-								Filters.exists(ORIGIN_ADDRESS).not()
-								)
+							Filters.eq(ORIGIN_ADDRESS, hostAddress),
+							Filters.exists(ORIGIN_ADDRESS).not()
+							)
 							)
 					.update(
 							set(WEBRTC_VIEWER_COUNT, 0),
@@ -1354,14 +1930,15 @@ public class MongoStore extends DataStore {
 					.execute(new UpdateOptions().multi(true))
 					.getModifiedCount();
 
-
-			//delete streaminfo 
+			//delete streaminfo
 			totalOperationCount +=  datastore.find(StreamInfo.class)
 					.filter(Filters.eq("host", hostAddress))
 					.delete(new DeleteOptions().multi(true))
 					.getDeletedCount();
 
 		}
+		
+		recordQueryDuration(startTime, "resetBroadcasts");
 
 		return totalOperationCount;
 	}
@@ -1380,113 +1957,109 @@ public class MongoStore extends DataStore {
 	@Override
 	public int getTotalWebRTCViewersCount() 
 	{
+		long startTime = System.nanoTime();
+
 		long now = System.currentTimeMillis();
 		if(now - totalWebRTCViewerCountLastUpdateTime > TOTAL_WEBRTC_VIEWER_COUNT_CACHE_TIME) {
-			synchronized(this) {
-				
+			synchronized(broadcastLock) {
+
 				int total = 0;
-				
+
+
 				MorphiaCursor<Summation> cursor = datastore.aggregate(Broadcast.class)
-					.match(Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING))
-					.group(Group.group().field("total", sum(field(WEBRTC_VIEWER_COUNT))))
-					.execute(Summation.class);
-				
+						.match(Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING))
+						.group(Group.group().field("total", sum(field(WEBRTC_VIEWER_COUNT))))
+						.execute(Summation.class);
+
 
 				if(cursor.hasNext()) {
 					total = (cursor.next()).getTotal();
 				}
-				
+
 
 				totalWebRTCViewerCount = total;
 				totalWebRTCViewerCountLastUpdateTime = now;
 			}
 		}
+		
+		recordQueryDuration(startTime, "getTotalWebRTCViewersCount");
 		return totalWebRTCViewerCount;
 	}
 
 	@Override
-	public void saveViewerInfo(WebRTCViewerInfo info) {
-		synchronized(this) {
-			if (info == null) {
-				return;
+	public int getTotalViewersCount() {
+		long startTime = System.nanoTime();
+		int total = sumBroadcastingField(WEBRTC_VIEWER_COUNT) + sumBroadcastingField(HLS_VIEWER_COUNT) + sumBroadcastingField(DASH_VIEWER_COUNT);
+		recordQueryDuration(startTime, "getTotalViewersCount");
+		return total;
+	}
+
+	private int sumBroadcastingField(String fieldName) {
+		synchronized (broadcastLock) {
+			int total = 0;
+			MorphiaCursor<Summation> cursor = datastore.aggregate(Broadcast.class)
+					.match(Filters.eq(STATUS, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING))
+					.group(Group.group().field("total", sum(field(fieldName))))
+					.execute(Summation.class);
+			if (cursor.hasNext()) {
+				total = cursor.next().getTotal();
 			}
-			datastore.save(info);
+			return total;
 		}
 	}
 
-	@Override
-	public List<WebRTCViewerInfo> getWebRTCViewerList(int offset, int size, String sortBy, String orderBy,
-			String search) {
-		synchronized(this) {
-			Query<WebRTCViewerInfo> query = datastore.find(WebRTCViewerInfo.class);
-
-			if (size > MAX_ITEM_IN_ONE_LIST) {
-				size = MAX_ITEM_IN_ONE_LIST;
-			}
-
-			FindOptions findOptions = new FindOptions().skip(offset).limit(size);
-
-			if (sortBy != null && orderBy != null && !sortBy.isEmpty() && !orderBy.isEmpty()) {
-				findOptions.sort(orderBy.equals("desc") ? Sort.descending(sortBy) : Sort.ascending(sortBy));
-
-			}
-			if (search != null && !search.isEmpty()) {
-				logger.info("Server side search is called for WebRTCViewerInfo = {}", search);
-				
-				query.filter(
-						Filters.regex(VIEWER_ID).caseInsensitive().pattern(".*" + search + ".*")
-			    );
-
-			}
-			return query.iterator(findOptions).toList();
-		}
-	}
-
-	@Override
-	public boolean deleteWebRTCViewerInfo(String viewerId) {
-		synchronized(this) {
-			return datastore.find(WebRTCViewerInfo.class)
-					.filter(Filters.eq(VIEWER_ID, viewerId))
-					.delete()
-					.getDeletedCount() == 1;
-		}
-	}
-	
 	/**
 	 * {@inheritDoc}
 	 */
 	@Override
 	public boolean updateStreamMetaData(String streamId, String metaData) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		synchronized(broadcastLock) {
 			try {
+				String cacheKey = getBroadcastCacheKey(streamId);
+				Broadcast cachedBroadcast = getBroadcastCache().get(cacheKey, Broadcast.class);
+
+				if(cachedBroadcast != null) {
+					cachedBroadcast.setMetaData(metaData);
+				}
+
 				Query<Broadcast> query = datastore.find(Broadcast.class).filter(Filters.eq(STREAM_ID, streamId));
-				return query.update(set(META_DATA, metaData)).execute().getMatchedCount() == 1;
+				result = query.update(set(META_DATA, metaData)).execute().getMatchedCount() == 1;
+
 			} catch (Exception e) {
 				logger.error(e.getMessage());
 			}
 		}
-		return false;
+		recordQueryDuration(startTime, "updateStreamMetaData");
+		return result;
 	}
-	
+
 	public Datastore getSubscriberDatastore() {
 		return subscriberDatastore;
 	}
-	
+
 	@Override
 	public SubscriberMetadata getSubscriberMetaData(String subscriberId) {
-		synchronized(this) {
+		long startTime = System.nanoTime();
+		SubscriberMetadata metadata = null;
+		synchronized(subscriberLock) {
 			try {
-				return datastore.find(SubscriberMetadata.class).filter(Filters.eq(SUBSCRIBER_ID, subscriberId)).first();
+
+				metadata = datastore.find(SubscriberMetadata.class).filter(Filters.eq(SUBSCRIBER_ID, subscriberId)).first();
 			} catch (Exception e) {
 				logger.error(ExceptionUtils.getStackTrace(e));
 			}
 		}
-		return null;
+		recordQueryDuration(startTime, "getSubscriberMetaData");
+		return metadata;
 	}
-	
+
 	@Override
 	public void putSubscriberMetaData(String subscriberId, SubscriberMetadata metadata) {
-		
+		long startTime = System.nanoTime();
+
+
 		try {
 			//delete the subscriberId if exists to make it compatible with all datastores
 			Query<SubscriberMetadata> query = datastore.find(SubscriberMetadata.class).filter(Filters.eq(SUBSCRIBER_ID, subscriberId));
@@ -1494,17 +2067,201 @@ public class MongoStore extends DataStore {
 			if (deletedCount > 0) {
 				logger.info("There is a SubsriberMetadata exists in database. It's deleted(deletedCount:{}) and it'll put to make it easy and compatible.", deletedCount);
 			}
-				
+
 			metadata.setSubscriberId(subscriberId);
-			synchronized(this) {
+			synchronized(subscriberLock) {
+
 				datastore.save(metadata);
 			}
 		} catch (Exception e) {
 			logger.error(ExceptionUtils.getStackTrace(e));
 		}
+		
+		recordQueryDuration(startTime, "putSubscriberMetaData");
 	}
-	
+
 	public Datastore getConferenceRoomDatastore() {
 		return conferenceRoomDatastore;
+	}
+
+	@Override
+	public List<Broadcast> getSubtracks(String mainTrackId, int offset, int size, String role) {
+		return getSubtracks(mainTrackId, offset, size, role, null, null, null, null);
+	}
+
+	@Override
+	public List<Broadcast> getSubtracks(String mainTrackId, int offset, int size, String role, String status, String sortBy, String orderBy, String search) {
+		long startTime = System.nanoTime();
+		List<Broadcast> subtracks = new ArrayList<>();
+		synchronized(broadcastLock) {
+
+			Filter roleFilter = getFilterForSubtracks(mainTrackId, role, status);
+			Query<Broadcast> query = datastore.find(Broadcast.class);
+			FindOptions findingOptions = new FindOptions().skip(offset).limit(size);
+
+			if(sortBy != null && orderBy != null && !sortBy.isEmpty() && !orderBy.isEmpty()) {
+				findingOptions.sort(orderBy.equals("desc") ? Sort.descending(sortBy) : Sort.ascending(sortBy));
+
+			}
+			if(search != null && !search.isEmpty())
+			{
+				logger.info("Server side search in broadcast for the text -> {}", search);
+
+				// if search is not a valid regex, then search as a text in name
+				if (!checkIfRegexValid(search)) {
+					query.filter(Filters.text(search));
+				} else {
+					query.filter(Filters.or(
+							Filters.regex(STREAM_ID).caseInsensitive().pattern(".*" + search + ".*"),
+							Filters.regex("name").caseInsensitive().pattern(".*" + search + ".*")
+							)
+							);
+				}
+			}
+			
+			subtracks = query.filter(roleFilter).iterator(findingOptions).toList();
+		}
+		
+		recordQueryDuration(startTime, "getSubtracks");
+
+		return subtracks;
+	}
+
+	private LogicalFilter getFilterForSubtracks(String mainTrackId, String role, String status) {
+
+		LogicalFilter filter = Filters.and(Filters.eq(MAIN_TRACK_STREAM_ID, mainTrackId));
+
+		if(StringUtils.isNotBlank(role)) {
+			filter.add(Filters.eq(ROLE, role));
+		}
+
+		if (StringUtils.isNotBlank(status)) {
+			filter.add(Filters.eq(STATUS, status));
+		}
+
+		return filter;
+	}
+
+	@Override
+	public long getSubtrackCount(String mainTrackId, String role, String status) {
+		long startTime = System.nanoTime();
+		long subtrackCount = 0;
+		synchronized(broadcastLock) {
+			subtrackCount = datastore.find(Broadcast.class).filter(getFilterForSubtracks(mainTrackId, role, status)).count();
+		}
+		recordQueryDuration(startTime, "getSubtrackCount");
+		return subtrackCount;
+	}
+
+
+	@Override
+	public List<Broadcast> getActiveSubtracks(String mainTrackId, String role) {
+
+		long startTime = System.nanoTime();
+
+		LogicalFilter filterForSubtracks = getFilterForSubtracks(mainTrackId, role, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING);
+		long activeIntervalValue = System.currentTimeMillis() - (2 * MuxAdaptor.STAT_UPDATE_PERIOD_MS);
+		filterForSubtracks.add(Filters.gte(UPDATE_TIME_FIELD, activeIntervalValue));
+		List<Broadcast> subtracks = new ArrayList<>();
+
+		synchronized(broadcastLock) {
+
+			subtracks = datastore.find(Broadcast.class)
+					.filter(filterForSubtracks)
+					.iterator().toList();
+		}
+		
+		recordQueryDuration(startTime, "getActiveSubtracks");
+
+		return subtracks;
+	}
+
+	@Override
+	public List<Broadcast> getActiveSubtracks(String mainTrackId, int offset, int size, String role) {
+
+	
+		if (size <= 0) {
+			//return empty list if size is not valid
+			return new ArrayList<>();
+		}
+		long startTime = System.nanoTime();
+
+		LogicalFilter filterForSubtracks = getFilterForSubtracks(mainTrackId, role, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING);
+		long activeIntervalValue = System.currentTimeMillis() - (2 * MuxAdaptor.STAT_UPDATE_PERIOD_MS);
+		filterForSubtracks.add(Filters.gte(UPDATE_TIME_FIELD, activeIntervalValue));
+		List<Broadcast> subtracks = new ArrayList<>();
+		FindOptions findingOptions = new FindOptions().skip(offset).limit(size);
+
+		synchronized(broadcastLock) {
+
+			subtracks = datastore.find(Broadcast.class)
+					.filter(filterForSubtracks)
+					.iterator(findingOptions).toList();
+		}
+		
+		recordQueryDuration(startTime, "getActiveSubtracks-with-pagination");
+
+		return subtracks;
+	}
+
+	@Override
+	public long getActiveSubtracksCount(String mainTrackId, String role) {
+		long startTime = System.nanoTime();
+
+		LogicalFilter filterForSubtracks = getFilterForSubtracks(mainTrackId, role, IAntMediaStreamHandler.BROADCAST_STATUS_BROADCASTING);
+		long activeIntervalValue = System.currentTimeMillis() - (2 * MuxAdaptor.STAT_UPDATE_PERIOD_MS);
+		filterForSubtracks.add(Filters.gte(UPDATE_TIME_FIELD, activeIntervalValue));
+		long subtrackCount = 0;
+		synchronized(broadcastLock) {
+
+			subtrackCount = datastore.find(Broadcast.class)
+					.filter(filterForSubtracks).count();
+		}
+		
+		recordQueryDuration(startTime, "getActiveSubtracksCount");
+		return subtrackCount;
+	}
+
+	public boolean hasSubtracks(String streamId) {
+		long startTime = System.nanoTime();
+		boolean result = false;
+		LogicalFilter filterForSubtracks = getFilterForSubtracks(streamId, null, null);
+		synchronized(broadcastLock) {
+
+			result = datastore.find(Broadcast.class)
+					.filter(filterForSubtracks).first() != null;
+		}
+		
+		recordQueryDuration(startTime, "hasSubtracks");
+
+		return result;
+	}
+
+	public CaffeineCacheManager getCacheManager(){
+		return cacheManager;
+	}
+
+	public CaffeineCache getSubscriberCache() {
+		if(subscriberCache == null){
+			subscriberCache = (CaffeineCache) cacheManager.getCache(SUBSCRIBER_CACHE);
+		}
+
+		return subscriberCache;
+	}
+	
+	public CaffeineCache getBroadcastCache() {
+		if(broadcastCache == null){
+			broadcastCache = (CaffeineCache) broadcastCacheManager.getCache(BROADCAST_CACHE);
+		}
+
+		return broadcastCache;
+	}
+
+
+
+	private void recordQueryDuration(long startTime, String operationName) {
+		long elapsedNanos = System.nanoTime() - startTime;
+		addQueryTime(elapsedNanos);
+		showWarningIfElapsedTimeIsMoreThanThreshold(elapsedNanos, operationName);
 	}
 }

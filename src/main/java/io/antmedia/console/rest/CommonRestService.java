@@ -13,11 +13,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.util.Arrays;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Objects;
-import java.util.Queue;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,13 +38,17 @@ import org.red5.server.Launcher;
 import org.red5.server.api.scope.IScope;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.ApplicationContext;
 import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.support.SpringBeanAutowiringSupport;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.common.annotations.VisibleForTesting;
 
 import ch.qos.logback.classic.Level;
 import io.antmedia.AntMediaApplicationAdapter;
@@ -67,12 +67,13 @@ import io.antmedia.licence.ILicenceService;
 import io.antmedia.rest.RestServiceBase;
 import io.antmedia.rest.model.Result;
 import io.antmedia.rest.model.SslConfigurationType;
-import io.antmedia.rest.model.UserType;
+import io.antmedia.datastore.db.types.UserType;
 import io.antmedia.rest.model.Version;
 import io.antmedia.security.SslConfigurator;
 import io.antmedia.settings.ServerSettings;
 import io.antmedia.statistic.IStatsCollector;
 import io.antmedia.statistic.StatsCollector;
+import jakarta.annotation.PostConstruct;
 import jakarta.ws.rs.FormParam;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.QueryParam;
@@ -128,6 +129,8 @@ public class CommonRestService {
 
 	public static final String NODE_GROUP = "nodeGroup";
 
+	public static final String PROMETHEUS_ENABLED = ServerSettings.SETTINGS_PROMETHEUS_ENABLED;
+
 	Gson gson = new Gson();
 
 	private AbstractConsoleDataStore dataStore;
@@ -140,8 +143,6 @@ public class CommonRestService {
 
 	private static final String LICENSE_STATUS = "license";
 
-	protected ApplicationContext applicationContext;
-
 	@Context
 	private ServletContext servletContext;
 
@@ -151,9 +152,11 @@ public class CommonRestService {
 	private ConsoleDataStoreFactory dataStoreFactory;
 	private ServerSettings serverSettings;
 
-	private ILicenceService licenceService;
+	private Optional<ILicenceService> licenceService = Optional.empty();
 
 	private IStatsCollector statsCollector;
+
+	private AdminApplication application;
 
 	private static final int BLOCKED_LOGIN_TIMEOUT_SECS = 300 ; // in seconds
 
@@ -164,9 +167,20 @@ public class CommonRestService {
 	public static final String USER_TYPE = "user-type";
 
 	public static final String SCOPE_SYSTEM = "system";
+	
+	
+	public static final String APP_NAME_REGEX = "^[a-zA-Z0-9_-]*$";
+
 
 	public int getAllowedLoginAttempts() {
 		return ALLOWED_LOGIN_ATTEMPTS;
+	}
+
+	@PostConstruct
+	public void initializeSpringDependencies() {
+		if (dataStoreFactory == null && servletContext != null) {
+			SpringBeanAutowiringSupport.processInjectionBasedOnServletContext(this, servletContext);
+		}
 	}
 
 
@@ -197,7 +211,7 @@ public class CommonRestService {
 		String message = "";
 		if (user != null) 
 		{
-			if (!getDataStore().doesUsernameExist(user.getEmail()) && user.getPassword() != null && user.getEmail() != null && user.getUserType() != null)
+			if (!getDataStore().doesUsernameExist(user.getEmail()) && user.getPassword() != null && user.getEmail() != null)
 			{
 				user.setPassword(getMD5Hash(user.getPassword()));
 				result = getDataStore().addUser(user);
@@ -205,7 +219,7 @@ public class CommonRestService {
 
 				new Thread() {
 					public void run() {
-						sendUserInfo(user.getEmail(), user.getFirstName(), user.getLastName(), user.getScope(), user.getUserType().toString());
+						sendUserInfo(user.getEmail(), user.getFirstName(), user.getLastName(), user.getScope(), user.getUserType().toString(), user.getAppNameUserType());
 					};
 				}.start();
 			}
@@ -227,12 +241,17 @@ public class CommonRestService {
 
 
 
+
 	public Result addInitialUser(User user) {
 		boolean result = false;
 		int errorId = -1;
 		user.setPassword(getMD5Hash(user.getPassword()));
 		user.setUserType(UserType.ADMIN);
 		user.setScope(SCOPE_SYSTEM);
+		Map<String, String> appNameUserType = new HashMap<>();
+		appNameUserType.put(SCOPE_SYSTEM, UserType.ADMIN.toString());
+		user.setAppNameUserType(appNameUserType);
+
 		if (getDataStore().getNumberOfUserRecords() == 0) {
 			result = getDataStore().addUser(user);
 		}
@@ -245,7 +264,7 @@ public class CommonRestService {
 			@Override
 			public void run() 
 			{
-				sendUserInfo(user.getEmail(), user.getFirstName(), user.getLastName(), user.getScope(), user.getUserType().toString());
+				sendUserInfo(user.getEmail(), user.getFirstName(), user.getLastName(), user.getScope(), user.getUserType().toString(), user.getAppNameUserType());
 			}
 		}.start();
 
@@ -257,7 +276,7 @@ public class CommonRestService {
 		return  HttpClients.createDefault();
 	}
 
-	public boolean sendUserInfo(String email, String firstname, String lastname, String scope, String userType) 
+	public boolean sendUserInfo(String email, String firstname, String lastname, String scope, String userType, Map<String,String> appNameUserTypeMap)
 	{
 		boolean success = false;
 
@@ -296,6 +315,10 @@ public class CommonRestService {
 			builder.addTextBody("instanceId", instanceId);
 			builder.addTextBody("userScope", scope);
 			builder.addTextBody("userType", userType);
+			String jsonAppNameUserType = gson.toJson(appNameUserTypeMap);
+			builder.addTextBody("appNameUserType", jsonAppNameUserType);
+
+
 
 
 			HttpEntity httpEntity = builder.build();
@@ -378,8 +401,10 @@ public class CommonRestService {
 		boolean result = false;
 		if (tryToAuthenticate) 
 		{
-			result = getDataStore().doesUserExist(user.getEmail(), user.getPassword()) ||
-					getDataStore().doesUserExist(user.getEmail(), getMD5Hash(user.getPassword()));
+			
+			String md5Password = getMD5Hash(user.getPassword());
+			result = getDataStore().doesUserExist(user.getEmail(), md5Password) || 
+					getDataStore().doesUserExist(user.getEmail(), getMD5Hash(md5Password));
 
 			if (result) 
 			{
@@ -388,8 +413,28 @@ public class CommonRestService {
 				session.setAttribute(USER_EMAIL, user.getEmail());
 				session.setAttribute(USER_PASSWORD, getMD5Hash(user.getPassword()));
 				user = getDataStore().getUser(user.getEmail());
-				message = user.getScope() + "/" + user.getUserType();
+				if(user.getScope() != null && user.getUserType() != null){
+					message = user.getScope() + "/" + user.getUserType();
+
+				}else if(user.getAppNameUserType() != null){
+					JsonObject appNameUserTypeJson = new JsonObject();
+					for (Map.Entry<String, String> entry : user.getAppNameUserType().entrySet()) {
+						String appName = entry.getKey();
+						String userType = entry.getValue();
+
+						appNameUserTypeJson.addProperty(appName, userType);
+					}
+
+					message = appNameUserTypeJson.toString();
+				}
 				getDataStore().resetInvalidLoginCount(user.getEmail());
+				User userFinal = user;
+				//send user info
+				new Thread() {
+					public void run() {
+						sendUserInfo(userFinal.getEmail(), userFinal.getFirstName(), userFinal.getLastName(), userFinal.getScope(), userFinal.getUserType().toString(), userFinal.getAppNameUserType());
+					}
+				}.start();
 			} 
 			else 
 			{
@@ -407,6 +452,16 @@ public class CommonRestService {
 		return new Result(result, message);
 
 	}
+	
+	
+	public Result deleteSession() {
+		HttpSession session = servletRequest.getSession();
+		session.invalidate();
+		
+		return new Result(true);
+	}
+	
+	
 	public void setRequestForTest(HttpServletRequest testRequest){
 		servletRequest = testRequest;
 	}
@@ -680,18 +735,18 @@ public class CommonRestService {
 
 	public String getSystemResourcesInfo() {
 
-		AdminApplication application = getApplication();
-		IScope rootScope = application.getRootScope();
+		AdminApplication app = getApplication();
+		IScope rootScope = app.getRootScope();
 
 		//add live stream size
 		int totalLiveStreams = 0;
 		Queue<IScope> scopes = new LinkedList<>();
-		List<String> appNames = application.getApplications();
+		List<String> appNames = app.getApplications();
 		for (String name : appNames) 
 		{
 			IScope scope = rootScope.getScope(name);
 			scopes.add(scope);
-			totalLiveStreams += application.getAppLiveStreamCount(scope);
+			totalLiveStreams += app.getAppLiveStreamCount(scope);
 		}
 
 		JsonObject jsonObject = StatsCollector.getSystemResourcesInfo(scopes);
@@ -704,7 +759,23 @@ public class CommonRestService {
 	}
 
 
-	public String getGPUInfo() 
+	public String getSystemResourcesHistory() {
+		IStatsCollector statsCollector = getStatsCollector();
+		return statsCollector != null ? gson.toJson(statsCollector.getSystemResourcesHistory()) : "{}";
+	}
+
+	public String getAppMetricsHistory(String appName) {
+		IStatsCollector statsCollector = getStatsCollector();
+		return statsCollector != null ? gson.toJson(statsCollector.getAppMetricsHistory(appName)) : "{}";
+	}
+
+	public String getNetworkStatus() {
+		IStatsCollector statsCollector = getStatsCollector();
+		return statsCollector != null ? gson.toJson(statsCollector.getNetworkStatus()) : "{}";
+	}
+
+
+	public String getGPUInfo()
 	{
 		return gson.toJson(StatsCollector.getGPUInfoJSObject());
 	}
@@ -815,10 +886,10 @@ public class CommonRestService {
 	public AntMediaApplicationAdapter getAppAdaptor(String appName) {
 
 		AntMediaApplicationAdapter appAdaptor = null;
-		AdminApplication application = getApplication();
-		if (application != null) 
+		AdminApplication app = getApplication();
+		if (app != null)
 		{
-			ApplicationContext context = application.getApplicationContext(appName);
+			ApplicationContext context = app.getApplicationContext(appName);
 			if (context != null) 
 			{
 				appAdaptor = (AntMediaApplicationAdapter) context.getBean(AntMediaApplicationAdapter.BEAN_NAME);
@@ -974,13 +1045,13 @@ public class CommonRestService {
 			sslConfigurator.setDomain(fqdn);
 			sslConfigurator.setType(sslConfigurationType);
 
-			String command = sslConfigurator.getCommand();
-			if (command != null) 
+			String[] commandArgs = sslConfigurator.getCommandArgs();
+			if (commandArgs != null)
 			{
 				AdminApplication adminApplication = getApplication();
 				if (adminApplication != null) 
 				{
-					result.setSuccess(adminApplication.runCommand(command));
+					result.setSuccess(adminApplication.runConfiguredCommand(AdminApplication.ENABLE_SSL_COMMAND, commandArgs));
 				}
 			}
 			else {
@@ -1052,6 +1123,14 @@ public class CommonRestService {
 	}
 
 	public String changeServerSettings(ServerSettings serverSettings){
+		String requestedHostAddress = serverSettings.getHostAddress();
+		String currentHostAddress = getServerSettingsInternal().getHostAddress();
+		if (!Objects.equals(requestedHostAddress, currentHostAddress)) {
+			logger.warn("Rejecting server settings update because the request host address does not match this server");
+			return gson.toJson(new Result(false,
+					"Server settings belong to another host. Reload the page and try again."));
+		}
+
 		PreferenceStore store = new PreferenceStore(RED5_PROPERTIES_PATH);
 
 		String serverName = "";
@@ -1073,6 +1152,9 @@ public class CommonRestService {
 
 		store.put(NODE_GROUP, String.valueOf(serverSettings.getNodeGroup()));
 		getServerSettingsInternal().setNodeGroup(serverSettings.getNodeGroup());
+
+		store.put(PROMETHEUS_ENABLED, String.valueOf(serverSettings.isPrometheusEnabled()));
+		getServerSettingsInternal().setPrometheusEnabled(serverSettings.isPrometheusEnabled());
 
 		ch.qos.logback.classic.Logger rootLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ROOT_LOGGER_NAME);
 
@@ -1111,15 +1193,13 @@ public class CommonRestService {
 	}
 
 
-	public IStatsCollector getStatsCollector () {
-		if(statsCollector == null) 
-		{
-			WebApplicationContext ctxt =getContext();
-			if (ctxt != null) {
-				statsCollector = (IStatsCollector)ctxt.getBean(IStatsCollector.BEAN_NAME);
-			}
-		}
+	public IStatsCollector getStatsCollector() {
 		return statsCollector;
+	}
+
+	@Autowired
+	public void setStatsCollector(IStatsCollector statsCollector) {
+		this.statsCollector = Objects.requireNonNull(statsCollector, "Stats collector is not initialized");
 	}
 
 	public ServerSettings getServerSettings() 
@@ -1129,16 +1209,18 @@ public class CommonRestService {
 
 	public Licence getLicenceStatus(@QueryParam("key") String key) 
 	{
-		if(key == null) {
+		ILicenceService service = getLicenceServiceInstance();
+		if(key == null || service == null) {
 			return null;
 		}
-		return getLicenceServiceInstance().checkLicence(key);
+		return service.checkLicence(key);
 	}
 
 
 	public Licence getLicenceStatus() 
 	{
-		return getLicenceServiceInstance().getLastLicenseStatus();
+		ILicenceService service = getLicenceServiceInstance();
+		return service != null ? service.getLastLicenseStatus() : null;
 	}
 
 	/**
@@ -1158,14 +1240,12 @@ public class CommonRestService {
 		return new Result(false, "No application adaptor with this name " + appname);
 	}
 
+	@VisibleForTesting
 	public void setDataStore(AbstractConsoleDataStore dataStore) {
 		this.dataStore = dataStore;
 	}
 
 	public AbstractConsoleDataStore getDataStore() {
-		if (dataStore == null) {
-			dataStore = getDataStoreFactory().getDataStore();
-		}
 		return dataStore;
 	}
 
@@ -1174,52 +1254,43 @@ public class CommonRestService {
 	}
 
 	public ServerSettings getServerSettingsInternal() {
-
-		if(serverSettings == null) 
-		{
-			WebApplicationContext ctxt = getContext();
-			if (ctxt != null) {
-				serverSettings = (ServerSettings)ctxt.getBean(ServerSettings.BEAN_NAME);
-			}
-		}
 		return serverSettings;
+	}
+
+	@Autowired
+	public void setServerSettings(ServerSettings serverSettings) {
+		this.serverSettings = Objects.requireNonNull(serverSettings, "Server settings are not initialized");
 	}
 
 
 
-	public ILicenceService getLicenceServiceInstance () {
-		if(licenceService == null) {
+	public ILicenceService getLicenceServiceInstance() {
+		return licenceService.orElse(null);
+	}
 
-			WebApplicationContext ctxt = getContext();
-			if (ctxt != null) {
-				licenceService = (ILicenceService)ctxt.getBean(ILicenceService.BeanName.LICENCE_SERVICE.toString());
-			}
-		}
-		return licenceService;
+	@Autowired
+	public void setLicenceService(Optional<ILicenceService> licenceService) {
+		this.licenceService = Objects.requireNonNull(licenceService);
 	}
 
 
 	public AdminApplication getApplication() {
-		WebApplicationContext ctxt = getContext();
-		if (ctxt != null) {
-			return (AdminApplication)ctxt.getBean("web.handler");
-		}
-		return null;
+		return application;
+	}
+
+	@Autowired
+	public void setApplication(@Qualifier("web.handler") AdminApplication application) {
+		this.application = Objects.requireNonNull(application, "Admin application is not initialized");
 	}
 
 	public ConsoleDataStoreFactory getDataStoreFactory() {
-		if(dataStoreFactory == null)
-		{
-			WebApplicationContext ctxt = getContext();
-			if (ctxt != null) {
-				dataStoreFactory = (ConsoleDataStoreFactory) ctxt.getBean("dataStoreFactory");
-			}
-		}
 		return dataStoreFactory;
 	}
 
+	@Autowired
 	public void setDataStoreFactory(ConsoleDataStoreFactory dataStoreFactory) {
-		this.dataStoreFactory = dataStoreFactory;
+		this.dataStoreFactory = Objects.requireNonNull(dataStoreFactory, "Console data store factory is not initialized");
+		this.dataStore = Objects.requireNonNull(dataStoreFactory.getDataStore(), "Console data store is not initialized");
 	}
 
 
@@ -1290,9 +1361,9 @@ public class CommonRestService {
 		//default log 
 		String logLocation = SERVER_LOG_LOCATION;
 
-		if (logType.equals(LOG_TYPE_ERROR)) {
+		if (LOG_TYPE_ERROR.equals(logType)) {
 			logLocation = ERROR_LOG_LOCATION;
-		} 
+		}
 
 		JsonObject jsonObject = new JsonObject();
 		String logContent = "";
@@ -1346,7 +1417,13 @@ public class CommonRestService {
 					}
 
 				}
-			} finally {
+				
+				logContent = ous.toString("UTF-8");
+			} 
+			catch (Exception e) {
+				logger.error(ExceptionUtils.getStackTrace(e));
+			}
+			finally {
 				try {
 					if (ous != null)
 						ous.close();
@@ -1362,7 +1439,7 @@ public class CommonRestService {
 				}
 			}
 
-			logContent = ous.toString("UTF-8");
+		
 		}
 		jsonObject.addProperty(LOG_CONTENT, logContent);
 		jsonObject.addProperty(LOG_CONTENT_SIZE, contentSize);
@@ -1371,7 +1448,7 @@ public class CommonRestService {
 		return jsonObject.toString();
 	}
 
-	public String getMD5Hash(String pass){
+	public static String getMD5Hash(String pass){
 		String passResult= "";
 		try {
 			MessageDigest m=MessageDigest.getInstance("MD5");
@@ -1417,6 +1494,8 @@ public class CommonRestService {
 				tempSetting.setAppName(appName);
 				tempSetting.setPullWarFile(true);
 				tempSetting.setWarFileOriginServerAddress(getServerSettings().getHostAddress());
+				tempSetting.setAppStatus(AppSettings.APPLICATION_STATUS_INSTALLING);
+				tempSetting.setAppInstallationTime(System.currentTimeMillis());
 
 				clusterNotifier.getClusterStore().saveSettings(tempSetting);
 			}
@@ -1447,15 +1526,26 @@ public class CommonRestService {
 				    Thread.currentThread().interrupt();
 				}
 			}
-			
+
 			if (!applicationCreated) {
 				result.setSuccess(applicationCreated);
 				result.setMessage("Application " + appName + "is not created in the 20 seconds.");
 			}
 
 		}
-		
+
+		updateAppStatus(appName, result.isSuccess() ? AppSettings.APPLICATION_STATUS_INSTALLED
+				: AppSettings.APPLICATION_STATUS_INSTALLATION_FAILED);
+
 		return result;
+	}
+
+	private void updateAppStatus(String appName, String status) {
+		AppSettings appSettings = getSettings(appName);
+		logger.info("Update Application Status for {} from {} to {}", appName, appSettings.getAppStatus(), status);
+		appSettings.setAppStatus(status);
+
+		changeSettings(appName, appSettings);
 	}
 
 
@@ -1463,15 +1553,12 @@ public class CommonRestService {
 		appName = appName.replaceAll("[\n\r\t]", "_");
 		boolean result = false;
 		String message = "";
-		if (appName != null && appName.matches("^[a-zA-Z0-9]*$")) {
+		if (appName != null && appName.matches(APP_NAME_REGEX)) {
 			logger.info("delete application http request:{}", appName);
 			AppSettings appSettings = getSettings(appName);
 			
 			if (appSettings != null) {
-				appSettings.setToBeDeleted(true);
-				//change settings on the db to let undeploy the app
-				changeSettings(appName, appSettings);
-
+				updateAppStatus(appName, AppSettings.APPLICATION_STATUS_DELETED);
 				result = getApplication().deleteApplication(appName, deleteDB);
 			}
 			else {
@@ -1480,7 +1567,7 @@ public class CommonRestService {
 			}
 		}
 		else {
-			message = "appname contains invalid character and does not match regexp ^[a-zA-Z0-9]*$";
+			message = "appname contains invalid character and does not match regexp "+ APP_NAME_REGEX;
 		}
 		return new Result(result, message);
 	}

@@ -21,9 +21,22 @@ public class ClusterNode implements Serializable {
 	@Id
 	private String id;
 	private String ip;
+
+	/**
+	 * Private IPv4 address detected on an active local interface, for monitoring.
+	 * Null when no private address is available (including older registrations).
+	 * This does not replace the advertised cluster address in {@code ip}.
+	 */
+	private String privateIp;
 	private long lastUpdateTime;
 	private String memory;
 	private String cpu;
+
+	private int dbQueryAveargeTimeMs;
+
+	// Admin-defined note set from the management panel. Stored independently of the heartbeat
+	// fields (memory/cpu/lastUpdateTime) so periodic node updates never overwrite it.
+	private String note;
 	
 	@NotSaved
 	private String status;
@@ -54,8 +67,16 @@ public class ClusterNode implements Serializable {
 		this.ip = ip;
 	}
 
+	public String getPrivateIp() {
+		return privateIp;
+	}
+
+	public void setPrivateIp(String privateIp) {
+		this.privateIp = privateIp;
+	}
+
 	public String getStatus() {
-		if(System.currentTimeMillis() - lastUpdateTime > NODE_UPDATE_PERIOD*2) {
+		if((System.currentTimeMillis() - lastUpdateTime) > (NODE_UPDATE_PERIOD*4)) {
 			status = ClusterNode.DEAD;
 		}
 		else {
@@ -87,5 +108,27 @@ public class ClusterNode implements Serializable {
 
 	public void setCpu(String cpu) {
 		this.cpu = cpu;
+	}
+
+	/**
+	 * @return the dbQueryAveargeTimeMs
+	 */
+	public int getDbQueryAveargeTimeMs() {
+		return dbQueryAveargeTimeMs;
+	}
+
+	/**
+	 * @param dbQueryAveargeTimeMs the dbQueryAveargeTimeMs to set
+	 */
+	public void setDbQueryAveargeTimeMs(int dbQueryAveargeTimeMs) {
+		this.dbQueryAveargeTimeMs = dbQueryAveargeTimeMs;
+	}
+
+	public String getNote() {
+		return note;
+	}
+
+	public void setNote(String note) {
+		this.note = note;
 	}
 }

@@ -295,7 +295,7 @@ public class WebRtcAudioRecord {
 	}
 
 	/**
-	 * Prefer a specific {@link AudioDeviceInfo} device for recording. Calling after recording starts
+	 * Prefer a specific AudioDeviceInfo device for recording. Calling after recording starts
 	 * is valid but may cause a temporary interruption if the audio routing changes.
 	 */
 	//@RequiresApi(Build.VERSION_CODES.M)
@@ -607,7 +607,7 @@ public class WebRtcAudioRecord {
 	/**
 	 * @param audio => 20ms of encoded audio data
 	 */
-	public void notifyEncodedData(String trackId, ByteBuffer audio) {
+	public synchronized void notifyEncodedData(String trackId, ByteBuffer audio) {
 		ByteBuffer encodedByteBuffer = getEncodedByteBuffers().get(trackId);
 		if(encodedByteBuffer == null) {
 			encodedByteBuffer = ByteBuffer.allocateDirect(byteBuffer.capacity()*10);

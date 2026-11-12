@@ -26,10 +26,11 @@ domain=""
 password=
 renew_flag='false'
 freedomain=""
+restart_service='true' #if this is true, it restarts the service at the end of the script otherwise it does not
 
 helpRequest='false'
 
-while getopts i:d:v:p:e:f:rhc: option
+while getopts i:d:v:p:e:f:rshc: option
 do
   case "${option}" in
     f) FULL_CHAIN_FILE=${OPTARG};;
@@ -41,6 +42,7 @@ do
     r) renew_flag='true';;
     e) email=${OPTARG};;
     h) helpRequest='true';;
+    s) restart_service=${OPTARG};;
    esac
 done
 
@@ -65,7 +67,7 @@ usage() {
 }
 
 ipt_remove() {
-        iptab=`iptables -t nat -n -L PREROUTING | grep -E "REDIRECT.*dpt:80.*5080"`
+        iptab=`iptables -t nat -n -L PREROUTING 2>/dev/null  | grep -E "REDIRECT.*dpt:80.*5080"`
         if [ "$iptab" ]; then
                 iptables-save > /tmp/iptables_save
                 iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5080
@@ -102,10 +104,69 @@ get_password() {
   done
 }
 
+# Check if port 80 is in use for Let's Encrypt validation
+check_port_80() {
+    if lsof -i :80 -sTCP:LISTEN -t >/dev/null 2>&1; then
+        SERVICE=$(lsof -i :80 -sTCP:LISTEN -nP | awk 'NR==2 {print $1}')
+        echo -e "Port 80 is currently in use by \e[31m${SERVICE}\e[0m. Please stop the service to proceed with Let's Encrypt (Free SSL)."
+        exit 1
+    fi
+}
+
+
+install_pkgs() {
+    if [ -f /etc/debian_version ]; then
+       
+        REQUIRED_PKG=("jq" "dnsutils" "iptables")
+		MISSING_PKG=()
+		
+		for pkg in "${REQUIRED_PKG[@]}"; do
+		    if ! dpkg -s "$pkg" &> /dev/null; then
+		        MISSING_PKG+=("$pkg")
+		    fi
+		done
+		
+		if [ ${#MISSING_PKG[@]} -ne 0 ]; then
+		    echo "Missing packages: ${MISSING_PKG[*]}"
+		    $SUDO apt update -qq
+		    $SUDO apt install -y "${MISSING_PKG[@]}"
+		else
+		    echo "All required packages are already installed."
+		fi
+
+    elif [ -f /etc/redhat-release ]; then
+        OS_VERSION=$(rpm -E %rhel)
+        pkgs="jq bind-utils iptables"
+        if [[ "$OS_VERSION" == "8" ]]; then
+            $SUDO yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+        elif [[ "$OS_VERSION" == "9" ]]; then
+            $SUDO yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+        else
+            exit 1
+        fi
+        $SUDO yum install -y $pkgs || sudo dnf install -y $pkgs
+    fi
+}
+
+# Check if there is a Container and install necessary packages
+is_docker_container() {
+    if [ -f /.dockerenv ]; then
+        return 0
+    fi
+
+    return 1
+}
+
 SUDO="sudo"
 if ! [ -x "$(command -v sudo)" ]; then
   SUDO=""
 fi
+
+if is_docker_container; then
+    SUDO=""
+fi
+
+install_pkgs
 
 output() {
   OUT=$?
@@ -135,15 +196,6 @@ wait_for_dns_validation() {
   done
 }
 
-# Install jq
-install_jq() {
-    if ! [ command -v jq &> /dev/null ]; then
-        sudo apt update -qq
-        sudo apt install -y jq
-    fi
-}
-
-install_jq
 
 fullChainFileExist=false
 if [ ! -z "$FULL_CHAIN_FILE" ] && [ -f "$FULL_CHAIN_FILE" ]; then
@@ -175,11 +227,15 @@ if [ "$chainFileExist" != "$privateKeyFileExist" ]; then
    exit 1
 fi
 
-source $INSTALL_DIRECTORY/conf/jwt_marketplace_check.sh "$INSTALL_DIRECTORY"
+source $INSTALL_DIRECTORY/conf/jwt_generator.sh "$INSTALL_DIRECTORY"
+generate_jwt
 
 get_freedomain(){
   hostname="ams-$RANDOM"
-  result_marketplace=$(check_marketplace)
+  #Refactor: It seems that result_marketplace is not used. On the other hand, JWT_KEY is a variable in generate_jwt
+  #it's better to return JWT_KEY in generate_jwt and don't use any variable other script 
+  result_marketplace=$(generate_jwt)
+  check_port_80
   get_license_key=`cat $INSTALL_DIRECTORY/conf/red5.properties  | grep  "server.licence_key=*" | cut -d "=" -f 2`
   ip=`curl -s http://checkip.amazonaws.com`
   if [ ! -z $get_license_key ]; then
@@ -202,7 +258,7 @@ get_freedomain(){
     else
       domain=`cat $INSTALL_DIRECTORY/conf/red5.properties |egrep "ams-[0-9]*.antmedia.cloud" -o | uniq`
     fi
-  elif [ "$result_marketplace" == "true" ]; then
+  elif [ $(curl -s -L "$REST_URL" --header "ProxyAuthorization: $JWT_KEY" | jq -e '.buildForMarket' 2>/dev/null) == "true" ]; then
     check_api=`curl -s -X POST -H "Content-Type: application/json" "https://route.antmedia.io/create?domain=$hostname&ip=$ip&license=marketplace"`
     wait_for_dns_validation "$hostname"
     domain="$hostname"".antmedia.cloud"
@@ -216,18 +272,32 @@ get_freedomain(){
 get_new_certificate(){
 
   if [ "$fullChainFileExist" == false ]; then
+      check_port_80
       #  install letsencrypt and get the certificate
       echo "creating new certificate"
       distro
-      if [ "$ID" == "ubuntu" ]; then
+      if [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
 
-        $SUDO apt-get update -qq -y
-        output
+        
+        REQUIRED_PKG=("cron" "certbot" "python3-certbot-dns-route53")
+		MISSING_PKG=()
+		
+		for pkg in "${REQUIRED_PKG[@]}"; do
+		    if ! dpkg -s "$pkg" &> /dev/null; then
+		        MISSING_PKG+=("$pkg")
+		    fi
+		done
+		
+		if [ ${#MISSING_PKG[@]} -ne 0 ]; then
+		    echo "Missing packages: ${MISSING_PKG[*]}"
+		    $SUDO apt update -qq
+		    $SUDO apt install -y "${MISSING_PKG[@]}"
+		else
+		    echo "All required packages are already installed."
+		fi
+		
 
-        $SUDO apt-get install certbot python3-certbot-dns-route53 -qq -y
-        output
-
-      elif [ "$ID" == "centos" ] || [ "$ID" == "rocky" ] || [ "$ID" == "almalinux" ]; then
+      elif [ "$ID" == "centos" ] || [ "$ID" == "rocky" ] || [ "$ID" == "almalinux" ] || [ "$ID" == "rhel" ]; then
         $SUDO yum -y install epel-release
         $SUDO yum -y install certbot
         output
@@ -275,14 +345,19 @@ get_new_certificate(){
  fi
 }
 
-renew_certificate(){
+renew_certificate() {
 
-   echo "renewing certificate"
+    echo "renewing certificate"
 
-   $SUDO certbot renew
+    if [ -n "$domain" ]; then
+        $SUDO certbot certonly --standalone --non-interactive --agree-tos -d "$domain"
+    else
+        $SUDO certbot renew
+    fi
 
-   output
+    output
 }
+
 
 # We don't need keystore and truststore for Tomcat. We can use full chain and private key file directly.
 # However we need to have keystore and truststore for rtmps.
@@ -464,14 +539,31 @@ fi
 
 $SUDO sed -i "/server.name=/c\server.name=$domain"  "$INSTALL_DIRECTORY/conf/red5.properties"
 
+#change rtmps.enabled if it exits. If it does not exist, add it
+$SUDO sed -i "/rtmps.enabled=/c\rtmps.enabled=true" "$INSTALL_DIRECTORY/conf/red5.properties" || echo "rtmps.enabled=true" | $SUDO tee -a "$INSTALL_DIRECTORY/conf/red5.properties"
+
 #restore iptables redirect rule
 ipt_restore
 
 echo ""
 
-$SUDO service antmedia restart
+if is_docker_container; then
+    echo "You are running Ant Media Server in a Docker container. Please restart the container to apply the changes."
+    kill -HUP 1
+elif [ "$restart_service" == "true" ]; then 
+    echo "Restarting Ant Media Server..."
+    $SUDO service antmedia restart
+else
+    echo "Ant Media Server is not restarted because script is called just to install the ssl. Please restart it manually to apply the changes."
+fi
 
 output
+
+# Install systemd timer for SSL expiry check (run once so installation steps are complete)
+if [ -f "$INSTALL_DIRECTORY/conf/ssl_renewal_check.sh" ]; then
+    $SUDO chmod +x "$INSTALL_DIRECTORY/conf/ssl_renewal_check.sh"
+    $SUDO "$INSTALL_DIRECTORY/conf/ssl_renewal_check.sh" || true
+fi
 
 echo "SSL certificate is installed."
 echo "Https port: 5443"

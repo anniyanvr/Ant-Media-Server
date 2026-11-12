@@ -15,11 +15,14 @@ import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
-import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.apache.http.Header;
 import org.apache.http.HttpResponse;
+import org.apache.http.HttpStatus;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.client.methods.RequestBuilder;
@@ -32,6 +35,7 @@ import org.red5.server.api.scope.IBroadcastScope;
 import org.red5.server.api.scope.IGlobalScope;
 import org.red5.server.api.scope.IScope;
 import org.red5.server.api.scope.ScopeType;
+import org.red5.server.scope.Scope;
 import org.red5.server.scope.WebScope;
 import org.red5.server.tomcat.WarDeployer;
 import org.red5.server.util.ScopeUtils;
@@ -39,12 +43,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationContext;
 
+import com.google.common.net.HttpHeaders;
+
 import io.antmedia.AntMediaApplicationAdapter;
 import io.antmedia.cluster.IClusterNotifier;
 import io.antmedia.console.datastore.ConsoleDataStoreFactory;
 import io.antmedia.datastore.db.DataStoreFactory;
+import io.antmedia.console.plugin.PluginService;
+import io.antmedia.filter.JWTFilter;
+import io.antmedia.filter.TokenFilterManager;
 import io.vertx.core.Vertx;
 import jakarta.annotation.Nullable;
+import org.springframework.beans.factory.annotation.Autowired;
 
 
 /**
@@ -53,6 +63,17 @@ import jakarta.annotation.Nullable;
  * @author The Red5 Project (red5@osflash.org)
  */
 public class AdminApplication extends MultiThreadedApplicationAdapter {
+	private static final int JWT_TOKEN_TIMEOUT_MS = 60000;
+	public static final String CREATE_APP_COMMAND = "/bin/bash create_app.sh";
+	public static final String DELETE_APP_COMMAND = "/bin/bash delete_app.sh";
+	public static final String ENABLE_SSL_COMMAND = "sudo /bin/bash enable_ssl.sh";
+	private static final Pattern APPLICATION_NAME_PATTERN = Pattern.compile("^[A-Za-z0-9_-]+$");
+	private static final Pattern BOOLEAN_ARGUMENT_PATTERN = Pattern.compile("^(true|false)$");
+	private static final Pattern PATH_ARGUMENT_PATTERN = Pattern.compile("^[A-Za-z0-9_./~:@%+=,-]+$");
+	private static final Pattern DB_URI_ARGUMENT_PATTERN = Pattern.compile("^[A-Za-z0-9_./~:@%+=,?!#\\[\\]&-]+$");
+	private static final Pattern DEFAULT_ARGUMENT_PATTERN = Pattern.compile("^[A-Za-z0-9_./~:@%+=,?!#\\[\\]&-]+$");
+
+
 	private static final Logger log = LoggerFactory.getLogger(AdminApplication.class);
 
 
@@ -83,6 +104,7 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 
 	private IClusterNotifier clusterNotifier;
 
+	private PluginService pluginService;
 
 	private Queue<String> currentApplicationCreationProcesses = new ConcurrentLinkedQueue<>();
 
@@ -93,22 +115,23 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 		vertx = (Vertx) scope.getContext().getBean("vertxCore");
 		warDeployer = (WarDeployer) app.getContext().getBean("warDeployer");
 
+		pluginService.scanInstalledPlugins();
+
 		if(isCluster) {
 			clusterNotifier = (IClusterNotifier) app.getContext().getBean(IClusterNotifier.BEAN_NAME);
-			clusterNotifier.registerCreateAppListener( (appName, warFileURI) -> 
-			createApplicationWithURL(appName, warFileURI)
+			clusterNotifier.registerCreateAppListener( (appName, warFileURI, secretKey) ->
+			createApplicationWithURL(appName, warFileURI, secretKey)
 					);
 			clusterNotifier.registerDeleteAppListener(appName -> {
 				log.info("Deleting application with name {}", appName);
 				return deleteApplication(appName, false);
 			});
-
 		}
 
 		return super.appStart(app);
 	}
 
-	public boolean createApplicationWithURL(String appName, String warFileURI) 
+	public boolean createApplicationWithURL(String appName, String warFileURI, String secretKey) 
 	{
 		//If installation takes long, prevent redownloading war and starting installation again
 		if(currentApplicationCreationProcesses.contains(appName)) {
@@ -116,15 +139,28 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 			return false;
 		}
 
-		log.info("Creating application with name {}", appName);
+		log.info("Creating application with name {} and uri:{}", appName, warFileURI);
 		boolean result = false;
 		try {
 			String warFileFullPath = null;
-			if (warFileURI != null && !warFileURI.isEmpty()) 
+			if (StringUtils.isNotBlank(warFileURI)) 
 			{
-				warFileFullPath = downloadWarFile(appName, warFileURI).getAbsolutePath();
-			}
+				if (warFileURI.startsWith("http"))  //covers both http and https
+				{
+					File file = downloadWarFile(appName, warFileURI, secretKey);
+					if (file == null) {
+						logger.error("War file cannot be downloaded from {}. App:{} will not be created", warFileURI, appName);
+						return false;
+					}
+					warFileFullPath = file.getAbsolutePath();
+				}
+				else 
+				{
+					warFileFullPath = warFileURI;
+				}
+				logger.info("war full path: {}", warFileFullPath);
 
+			}
 			result = createApplication(appName, warFileFullPath);
 
 		} 
@@ -179,7 +215,8 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 			info.liveStreamCount = getAppLiveStreamCount(getRootScope().getScope(name));
 			info.vodCount = getVoDCount(getRootScope().getScope(name));
 
-			info.storage = getStorage(name);
+			File appFolder = new File("webapps/"+name);
+			info.storage = getDirectorySize(appFolder.toPath());
 			appsInfo.add(info);
 		}
 
@@ -190,11 +227,29 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 	{
 		return (AntMediaApplicationAdapter) appScope.getContext().getApplicationContext().getBean(AntMediaApplicationAdapter.BEAN_NAME);
 	}
-
-	private long getStorage(String name) {
-		File appFolder = new File("webapps/"+name);
-		return FileUtils.sizeOfDirectory(appFolder);
-	}
+	
+	public static long getDirectorySize(Path dir) {
+		//Pay Attenton: that we previously uses FileUtils.sizeOfDirectory(appFolder); which throws exception when the directory size is +20GB  and files are deleted
+		//then we migrated to use getDirectorySize method which uses stream and parallel processing
+		//@mekya
+		
+        try (Stream<Path> walk = Files.walk(dir)) {
+            return walk
+                .parallel() // Enable parallel processing
+                .filter(Files::isRegularFile)
+                .mapToLong(p -> {
+                    try {
+                        return Files.size(p);
+                    } catch (IOException e) {
+                        return 0; // Ignore files that can't be accessed
+                    }
+                })
+                .sum();
+        } catch (IOException e) {
+        	logger.error("Error while calculating directory size: {}", ExceptionUtils.getMessage(e));
+            return -1; // Handle or log the exception as needed
+        }
+    }
 
 	public int getVoDCount(IScope appScope) {
 		int size = 0;
@@ -241,8 +296,16 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 		java.util.Set<String> names = root.getScopeNames();
 		List<String> apps = new ArrayList<>();
 		for (String name : names) {
-			if(!name.equals("root")) {
-				apps.add(name);
+
+			IScope scope = root.getScope(name);
+
+			if (scope instanceof Scope) {
+
+				Scope appScope = (Scope) scope;
+				if(!name.equals("root") && appScope.isRunning()) {
+					apps.add(name);
+				}
+
 			}
 		}
 
@@ -328,36 +391,56 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 		logger.info("Running create app script, war file name (null if default): {}, app name: {} ", warFileFullPath, appName);
 
 		//check if there is a non-completed deployment 
-		
+
 		WebScope appScope = (WebScope)getRootScope().getScope(appName);	
 		if (appScope != null && appScope.isRunning()) {
 			logger.info("{} already exists and running", appName);
 			currentApplicationCreationProcesses.remove(appName);
 			return false;
 		}
-		
+
 		String dbConnectionURL = getDataStoreFactory().getDbHost();
-		String mongoUser = getDataStoreFactory().getDbUser();
-		String mongoPass = getDataStoreFactory().getDbPassword();
-		success = runCreateAppScript(appName, isCluster, dbConnectionURL, mongoUser, mongoPass, warFileFullPath);
-		
+		success = runCreateAppScript(appName, isCluster, dbConnectionURL, warFileFullPath);
+
 
 		vertx.executeBlocking(() -> {
 			try {
 				warDeployer.deploy(true);
 			}
+			catch (Exception e) {
+				logger.error(ExceptionUtils.getStackTrace(e));
+			}
 			finally {
 				currentApplicationCreationProcesses.remove(appName);
 			}
 			return null;
-		});
+		}, false);
 
 		return success;
 
 	}
-	
+
 	public Queue<String> getCurrentApplicationCreationProcesses() {
 		return currentApplicationCreationProcesses;
+	}
+
+	public static String getJavaTmpDirectory() {
+		return System.getProperty("java.io.tmpdir");
+	}
+
+	public static File getWarFileInTmpDirectory(String warFileName) 
+	{
+		String tmpsDirectory = getJavaTmpDirectory();
+		File file = new File(tmpsDirectory + File.separator + warFileName);
+		if (file.exists()) {
+			return file;
+		}
+		return null;
+
+	}
+
+	public static String getWarName(String appName) {
+		return appName + ".war";
 	}
 
 	@Nullable
@@ -368,7 +451,7 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 
 		try {
 
-			String tmpsDirectory = System.getProperty("java.io.tmpdir");
+			String tmpsDirectory =  getJavaTmpDirectory();
 
 			File savedFile = new File(tmpsDirectory + File.separator + appName + "." + fileExtension);
 
@@ -395,22 +478,30 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 
 		return file;
 	}
-	
+
 	public CloseableHttpClient getHttpClient() {
 		return HttpClients.createDefault();
 	}
 
-	public File downloadWarFile(String appName, String warFileUrl) throws IOException
+	public File downloadWarFile(String appName, String warFileUrl, String jwtSecretKey) throws IOException
 	{
 
 		try (CloseableHttpClient client = getHttpClient()) 
 		{
 			RequestConfig requestConfig = RequestConfig.custom().setConnectTimeout(2 * 1000).setSocketTimeout(5*1000).build();
 
-			HttpRequestBase get = (HttpRequestBase) RequestBuilder.get().setUri(warFileUrl).build();
+			String jwtToken = JWTFilter.generateJwtToken(jwtSecretKey, System.currentTimeMillis() + JWT_TOKEN_TIMEOUT_MS, "appname", appName);
+
+			HttpRequestBase get = (HttpRequestBase) RequestBuilder.get().setUri(warFileUrl).addHeader(TokenFilterManager.TOKEN_HEADER_FOR_NODE_COMMUNICATION, jwtToken).build();
 			get.setConfig(requestConfig);
 
 			HttpResponse response = client.execute(get);
+			Header contentLengthHeader = response.getFirstHeader(HttpHeaders.CONTENT_LENGTH);
+			if (response.getStatusLine().getStatusCode() != HttpStatus.SC_OK || (contentLengthHeader != null && contentLengthHeader.getValue().equals("0"))) {
+				logger.error("Cannot download war file from URL: {} Response code: {} length:{}", warFileUrl,
+						response.getStatusLine().getStatusCode(), response.getFirstHeader(HttpHeaders.CONTENT_LENGTH).getValue());
+				return null;
+			}
 
 			try (BufferedInputStream in = new BufferedInputStream(response.getEntity().getContent())) 
 			{
@@ -427,7 +518,7 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 		//appScope is running after application has started
 		if (appScope != null && appScope.isRunning()) 
 		{
-			
+
 			logger.info("Deleting app:{} and appscope is running:{}", 
 					appName, appScope.isRunning());
 			getApplicationAdaptor(appScope).stopApplication(deleteDB);
@@ -450,58 +541,56 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 				logger.error("It detects an non-completed app deployment directory with name {}. It's being deleted.", appName);
 				success = runDeleteAppScript(appName);
 			}
-	
+
 		}
 
 		return success;
 	}
 
 	public boolean runCreateAppScript(String appName) {
-		return runCreateAppScript(appName, false, null, null, null, null);
+		return runCreateAppScript(appName, false, null, null);
 	}
 
 	public boolean runCreateAppScript(String appName, boolean isCluster, 
-			String dbConnectionUrl, String dbUser, String dbPass, String warFileName) {
+			String dbConnectionUrl, String warFileName) {
 		Path currentRelativePath = Paths.get("");
 		String webappsPath = currentRelativePath.toAbsolutePath().toString();
 
+		appName = WarDeployer.getApplicationName(appName);
+		List<String> args = new ArrayList<>();
+		args.add("-n");
+		args.add(appName);
+		args.add("-w");
+		args.add("true");
+		args.add("-p");
+		args.add(webappsPath);
+		args.add("-c");
+		args.add(String.valueOf(isCluster));
 
-		String command = "/bin/bash create_app.sh"
-				+ " -n " + appName
-				+ " -w true"
-				+ " -p " + webappsPath
-				+ " -c " + isCluster;
-		
 		if 	(!DataStoreFactory.DB_TYPE_MAPDB.equals(getDataStoreFactory().getDbType())) {
 			//add db connection url, user and pass if it's not mapdb
 			if (StringUtils.isNotBlank(dbConnectionUrl)) {
-				command +=  " -m " + dbConnectionUrl;
-			}
-			if (StringUtils.isNotBlank(dbUser)) {
-				command += " -u " + dbUser;
-			}
-			if (StringUtils.isNotBlank(dbPass)) {
-				command += " -s " + dbPass;
+				args.add("-m");
+				args.add(dbConnectionUrl);
 			}
 		}
 
 		if(StringUtils.isNotBlank(warFileName))
 		{
-			command += " -f " + warFileName;
+			args.add("-f");
+			args.add(warFileName);
 
 		}
-		
-		log.info("Creating application with command: {}", command);
-		return runCommand(command);
+
+		log.info("Creating application with command: {} {}", CREATE_APP_COMMAND, args);
+		return runConfiguredCommand(CREATE_APP_COMMAND, args.toArray(new String[0]));
 	}
 
 	public boolean runDeleteAppScript(String appName) {
 		Path currentRelativePath = Paths.get("");
 		String webappsPath = currentRelativePath.toAbsolutePath().toString();
 
-		String command = "/bin/bash delete_app.sh -n "+appName+" -p "+webappsPath;
-
-		return runCommand(command);
+		return runConfiguredCommand(DELETE_APP_COMMAND, "-n", appName, "-p", webappsPath);
 	}
 
 	public IClusterNotifier getClusterNotifier() {
@@ -510,11 +599,28 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 
 
 
-	public boolean runCommand(String command) {
+	public boolean runConfiguredCommand(String configuredCommand, String... args) {
+		boolean isConfiguredCommand = CREATE_APP_COMMAND.equals(configuredCommand) ||
+				DELETE_APP_COMMAND.equals(configuredCommand) ||
+				ENABLE_SSL_COMMAND.equals(configuredCommand);
+
+		if (!isConfiguredCommand) {
+			logger.warn("Discarding command because it is not one of the allowed admin commands: {}", configuredCommand);
+			return false;
+		}
+
+		List<String> command = new ArrayList<>();
+		Collections.addAll(command, configuredCommand.split(" "));
+		if (args != null) {
+			if (!areCommandArgumentsValid(configuredCommand, args)) {
+				return false;
+			}
+			Collections.addAll(command, args);
+		}
 
 		boolean result = false;
 		try {
-			Process process = getProcess(command);
+			Process process = new ProcessBuilder(command).start();
 			if (process != null) 
 			{
 				new Thread() 
@@ -538,7 +644,7 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 						}
 					}
 				}.start();
-				
+
 				result = process.waitFor() == 0;
 			}
 		}
@@ -552,33 +658,73 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 		return result;
 	}
 
-	public Process getProcess(String command) throws IOException {
-		//This code uses a regular expression to check if the command string contains any special characters 
-		// that may cause vulnerabilities, 
-		//such as ;, &, |, <, >, (, ), $, , , \r, \n, \t, *, ?, {, }, [, ], \, ", ', or whitespace characters. 
-		//If the command string contains any of these characters, it is considered unsafe to execute and the code prints an error message."
-
-		String[] parameters = command.split(" ");
-		String[] parametersToRun = new String[parameters.length];
-		for (int i = 0; i < parameters.length; i++) 
-		{
-			String param = parameters[i];
-			if (param.matches(".*[;&|<>()$`\\r\\n\\t*?{}\\[\\]\\\\\"'\\s].*")) 
-			{
-				logger.warn("Command includes special characters. Escaping the special characters. Argument:{} and full command:{}", param, command);
-				param = "'" + param + "'";
-			}
-			parametersToRun[i] = param;	
+	private boolean areCommandArgumentsValid(String configuredCommand, String[] args) {
+		if (CREATE_APP_COMMAND.equals(configuredCommand)) {
+			return areCreateAppArgumentsValid(args);
 		}
 
-		
-		ProcessBuilder pb = getProcessBuilder(parametersToRun);
-
-		return pb.start();
+		for (String arg : args) {
+			if (!isArgumentValid(arg, DEFAULT_ARGUMENT_PATTERN)) {
+				logger.warn("Discarding command because an argument includes invalid characters. Argument:{} and command:{}", arg, configuredCommand);
+				return false;
+			}
+		}
+		return true;
 	}
 
-	public ProcessBuilder getProcessBuilder(String[] parametersToRun) {
-		return new ProcessBuilder(parametersToRun);
+	private boolean areCreateAppArgumentsValid(String[] args) {
+		if (args.length == 0) {
+			return true;
+		}
+
+		if (!args[0].startsWith("-")) {
+			if (args.length > 2) {
+				logger.warn("Discarding create app command because legacy arguments include extra parameters");
+				return false;
+			}
+			return isArgumentValid(args[0], APPLICATION_NAME_PATTERN) &&
+					(args.length == 1 || isArgumentValid(args[1], PATH_ARGUMENT_PATTERN));
+		}
+
+		for (int i = 0; i < args.length; i += 2) {
+			if (i + 1 >= args.length) {
+				logger.warn("Discarding create app command because argument {} does not have a value", args[i]);
+				return false;
+			}
+
+			String flag = args[i];
+			String value = args[i + 1];
+			if (!isCreateAppValueValid(flag, value)) {
+				logger.warn("Discarding create app command because argument {} has an invalid value: {}", flag, value);
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private boolean isCreateAppValueValid(String flag, String value) {
+		switch (flag) {
+			case "-n":
+				return isArgumentValid(value, APPLICATION_NAME_PATTERN);
+			case "-w":
+			case "-c":
+				return isArgumentValid(value, BOOLEAN_ARGUMENT_PATTERN);
+			case "-p":
+			case "-f":
+				return isArgumentValid(value, PATH_ARGUMENT_PATTERN);
+			case "-m":
+				return isArgumentValid(value, DB_URI_ARGUMENT_PATTERN);
+			case "-u":
+			case "-s":
+				return isArgumentValid(value, DEFAULT_ARGUMENT_PATTERN);
+			default:
+				logger.warn("Discarding create app command because argument {} is not allowed", flag);
+				return false;
+		}
+	}
+
+	private boolean isArgumentValid(String argument, Pattern pattern) {
+		return argument != null && pattern.matcher(argument).matches();
 	}
 
 	public void setVertx(Vertx vertx) {
@@ -588,4 +734,14 @@ public class AdminApplication extends MultiThreadedApplicationAdapter {
 	public void setWarDeployer(WarDeployer warDeployer) {
 		this.warDeployer = warDeployer;
 	}
+
+	@Autowired
+	public void setPluginService(PluginService pluginService) {
+		this.pluginService = pluginService;
+	}
+
+	public PluginService getPluginService() {
+		return pluginService;
+	}
+
 }

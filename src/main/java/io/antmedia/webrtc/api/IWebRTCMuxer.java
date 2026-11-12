@@ -2,6 +2,7 @@ package io.antmedia.webrtc.api;
 
 import java.nio.ByteBuffer;
 import java.util.Queue;
+import java.util.Set;
 
 import io.antmedia.cluster.IStreamInfo;
 import io.antmedia.webrtc.VideoCodec;
@@ -48,7 +49,9 @@ public interface IWebRTCMuxer extends IStreamInfo {
 	 * Send video packet to WebRTCClients
 	 * @param videoPacket
 	 * @param isKeyFrame
-	 * @param trackIndex
+	 * @param timestamp
+	 * @param frameRotation
+	 * @param trackId
 	 */
 	public void sendTrackVideoPacket(ByteBuffer videoPacket, boolean isKeyFrame, long timestamp, int frameRotation,
 			String trackId);
@@ -79,7 +82,7 @@ public interface IWebRTCMuxer extends IStreamInfo {
 	 * Return the list of webrtc clients receiving data from webrtc muxer 
 	 * @return
 	 */
-	public Queue<IWebRTCClient> getClientList();
+	public Set<IWebRTCClient> getClientList();
 	
 	/**
 	 * Return the video codec of the IWebRTCMuxer

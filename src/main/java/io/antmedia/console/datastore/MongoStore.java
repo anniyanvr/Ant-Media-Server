@@ -3,6 +3,7 @@ package io.antmedia.console.datastore;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.slf4j.Logger;
@@ -15,7 +16,7 @@ import dev.morphia.Morphia;
 import dev.morphia.query.filters.Filters;
 import dev.morphia.query.updates.UpdateOperators;
 import io.antmedia.datastore.db.types.User;
-import io.antmedia.rest.model.UserType;
+import io.antmedia.datastore.db.types.UserType;
 
 public class MongoStore extends AbstractConsoleDataStore {
 
@@ -26,16 +27,16 @@ public class MongoStore extends AbstractConsoleDataStore {
 	protected volatile boolean available = false;
 	private com.mongodb.client.MongoClient mongoClient;
 	
-	public MongoStore(String dbHost, String dbUser, String dbPassword) {
+	public MongoStore(String dbHost) {
 		String dbName = SERVER_STORAGE_MAP_NAME;
 
-		String uri =  io.antmedia.datastore.db.MongoStore.getMongoConnectionUri(dbHost, dbUser, dbPassword);
+		String uri =  io.antmedia.datastore.db.MongoStore.getMongoConnectionUri(dbHost);
 
 		mongoClient = MongoClients.create(uri);
 
 		datastore = Morphia.createDatastore(mongoClient, dbName);
 		datastore.getMapper().mapPackage("io.antmedia.datastore.db.types");
-		
+
 		datastore.ensureIndexes();
 
 		available = true;
@@ -82,12 +83,15 @@ public class MongoStore extends AbstractConsoleDataStore {
 				String password = user.getPassword();
 				UserType userType = user.getUserType();
 				String scope = user.getScope();
+				Map<String, String> appNameUserType = user.getAppNameUserType();
+
 				return datastore.find(User.class)
-									.filter(Filters.eq("email", username))
-									.update(
-											UpdateOperators.set("password", password),
-											UpdateOperators.set("userType", userType),
-											UpdateOperators.set("scope",scope))
+                        .filter(Filters.eq("email", username)).update(
+                                UpdateOperators.set("password", password),
+                                UpdateOperators.set("userType", userType),
+                                UpdateOperators.set("scope", scope),
+                                UpdateOperators.set("appNameUserType", appNameUserType))
+
 									.execute()
 									.getMatchedCount() == 1;
 			} catch (Exception e) {
@@ -177,5 +181,4 @@ public class MongoStore extends AbstractConsoleDataStore {
 	public boolean isAvailable() {
 		return available;
 	}
-
 }

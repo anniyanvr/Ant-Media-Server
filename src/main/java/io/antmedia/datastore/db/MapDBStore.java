@@ -4,12 +4,8 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.Map.Entry;
 
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.mapdb.DB;
@@ -19,11 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.antmedia.datastore.db.types.Broadcast;
-import io.antmedia.datastore.db.types.ConferenceRoom;
-import io.antmedia.datastore.db.types.PushNotificationToken;
 import io.antmedia.datastore.db.types.StreamInfo;
-import io.antmedia.datastore.db.types.SubscriberMetadata;
-import io.antmedia.muxer.IAntMediaStreamHandler;
 import io.vertx.core.Vertx;
 
 
@@ -44,7 +36,7 @@ public class MapDBStore extends MapBasedDataStore {
 	private static final String CONFERENCE_ROOM_MAP_NAME = "CONFERENCE_ROOM";
 	private static final String WEBRTC_VIEWER = "WEBRTC_VIEWER";
 	private static final String SUBSCRIBER_METADATA = "SUBSCRIBER_METADATA";
-
+	private static final String CONNECTION_EVENTS = "CONNECTION_EVENTS";
 
 
 	public MapDBStore(String dbName, Vertx vertx) {
@@ -84,6 +76,9 @@ public class MapDBStore extends MapBasedDataStore {
 		
 		subscriberMetadataMap =  db.treeMap(SUBSCRIBER_METADATA).keySerializer(Serializer.STRING).valueSerializer(Serializer.STRING)
 				.counterEnable().createOrOpen();
+		
+		connectionEventsMap = db.treeMap(CONNECTION_EVENTS).keySerializer(Serializer.STRING)
+				.valueSerializer(Serializer.STRING).counterEnable().createOrOpen();
 
 		timerId = vertx.setPeriodic(5000,
 			id -> 
@@ -100,6 +95,9 @@ public class MapDBStore extends MapBasedDataStore {
 									}
 								}
 							}
+							catch (Exception e) {
+								logger.error(ExceptionUtils.getStackTrace(e));
+							}
 							finally {
 								committing.compareAndSet(true, false);
 							}
@@ -112,18 +110,12 @@ public class MapDBStore extends MapBasedDataStore {
 
 		available = true;
 		
-		
-		//migrate from conferenceRoomMap to Broadcast
-		// May 11, 2024
-		// we may remove this code after some time and ConferenceRoom class
-		// mekya
-		migrateConferenceRoomsToBroadcasts();
-		
 	}
 
 	@Override
 	public void close(boolean deleteDB) {
 		//get db file before closing. They can be used in delete method
+		long startTime = System.nanoTime();
 		Iterable<String> dbFiles = db.getStore().getAllFiles();
 		synchronized (this) {
 			vertx.cancelTimer(timerId);
@@ -148,6 +140,10 @@ public class MapDBStore extends MapBasedDataStore {
 			}
 
 		}
+		
+		long elapsedNanos = System.nanoTime() - startTime;
+		addQueryTime(elapsedNanos);
+		showWarningIfElapsedTimeIsMoreThanThreshold(elapsedNanos, "close(boolean deleteDB)");
 	}
 	
 	public long getLocalLiveBroadcastCount(String hostAddress) {

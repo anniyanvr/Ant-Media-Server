@@ -1,9 +1,13 @@
 package io.antmedia.test.filter;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.fail;
+
+import org.junit.jupiter.api.Tag;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.fail;
+
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -21,7 +25,7 @@ import org.apache.http.HttpResponse;
 import org.apache.http.StatusLine;
 import org.apache.http.message.BasicHeader;
 import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.junit.rules.TestRule;
 import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
@@ -48,6 +52,7 @@ import io.antmedia.security.ITokenService;
 import io.antmedia.settings.ServerSettings;
 import jakarta.ws.rs.HttpMethod;
 
+@Tag("fast")
 public class RestProxyTest {
 	protected static Logger logger = LoggerFactory.getLogger(IPFilterTest.class);
 	@Rule
@@ -126,6 +131,20 @@ public class RestProxyTest {
 
 		streamId = restFilter.getStreamId("rest/v2/broadcasts/123456");
 		assertEquals("123456",streamId);
+	}
+
+	@Test
+	public void testIsRunning() {
+		RestProxyFilter restFilter = spy(new RestProxyFilter());
+
+		
+		assertFalse(restFilter.isHostRunning(null, 1000));
+		
+		assertFalse(restFilter.isHostRunning("", 1000));
+		
+		assertFalse(restFilter.isHostRunning(" ", 1000));
+
+
 	}
 	
 	@Test

@@ -1,11 +1,14 @@
 package io.antmedia.console.datastore;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 
 import io.antmedia.AppSettings;
+import io.antmedia.datastore.db.DataStoreFactory;
 import io.antmedia.muxer.IAntMediaStreamHandler;
 import io.vertx.core.Vertx;
 
@@ -24,24 +27,10 @@ public class ConsoleDataStoreFactory implements ApplicationContextAware {
 	
 	@Value( "${"+io.antmedia.datastore.db.DataStoreFactory.SETTINGS_DB_HOST+":#{null}}" )
 	private String dbHost;
-	
-	/**
-	 * @deprecated
-	 * Use dbHost with full connection url including username and password
-	 */
-	@Deprecated(since = "2.7.0", forRemoval = true)
-	@Value( "${"+io.antmedia.datastore.db.DataStoreFactory.SETTINGS_DB_USER+":#{null}}" )
-	private String dbUser;
-	
-	/**
-	 * @deprecated
-	 * Use dbHost with full connection url including username and password
-	 */
-	@Deprecated(since = "2.7.0", forRemoval = true)
-	@Value( "${"+io.antmedia.datastore.db.DataStoreFactory.SETTINGS_DB_PASS+":#{null}}" )
-	private String dbPassword;
 
 	private Vertx vertx;
+	
+	private static Logger logger = LoggerFactory.getLogger(ConsoleDataStoreFactory.class);
 	
 	public String getAppName() {
 		return appName;
@@ -75,21 +64,7 @@ public class ConsoleDataStoreFactory implements ApplicationContextAware {
 		this.dbHost = dbHost;
 	}
 
-	public String getDbUser() {
-		return dbUser;
-	}
 
-	public void setDbUser(String dbUser) {
-		this.dbUser = dbUser;
-	}
-
-	public String getDbPassword() {
-		return dbPassword;
-	}
-
-	public void setDbPassword(String dbPassword) {
-		this.dbPassword = dbPassword;
-	}
 	@Override
 	public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
 		vertx = (Vertx)applicationContext.getBean(IAntMediaStreamHandler.VERTX_BEAN_NAME);
@@ -97,18 +72,20 @@ public class ConsoleDataStoreFactory implements ApplicationContextAware {
 
 	public AbstractConsoleDataStore getDataStore() {
 		if (dataStore == null) {
-			if(dbType.contentEquals("mongodb"))
+			if(DataStoreFactory.DB_TYPE_MONGODB.contentEquals(dbType))
 			{
-				
-				dataStore = new MongoStore(dbHost, dbUser, dbPassword);
+				dataStore = new MongoStore(dbHost);
 			}
-			else if(dbType.contentEquals("mapdb"))
+			else if(DataStoreFactory.DB_TYPE_MAPDB.contentEquals(dbType))
 			{
 				dataStore = new MapDBStore(vertx);
 			}
-			else if(dbType.contentEquals("redisdb"))
+			else if(DataStoreFactory.DB_TYPE_REDISDB.contentEquals(dbType))
 			{
 				dataStore = new RedisStore(dbHost);
+			}
+			else {
+				logger.error("Undefined Console Datastore:{}  db name:{}", dbType, dbName);
 			}
 		}
 		return dataStore;

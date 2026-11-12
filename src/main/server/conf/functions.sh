@@ -57,7 +57,7 @@ change_server_mode() {
       DB_TYPE=mapdb
       DB_URL=""
       echo "DB type is mapdb"
-    elif [[ $DB_HOST =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]{1,5})?$ || $DB_HOST =~ ^localhost(:[0-9]{1,5})?$ ||  $DB_HOST =~ ^mongo.*$ ]]; then
+    elif [[ $DB_URL =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]{1,5})?$ || $DB_URL =~ ^localhost(:[0-9]{1,5})?$ ||  $DB_URL =~ ^mongo.*$ ]]; then
       # it should be ^mongo.*$ not ^mongodb.*$ becaue kubernetes deployment give -h mongo parameter
       DB_TYPE=mongodb
       echo "DB type is mongodb"
@@ -113,7 +113,7 @@ else
 fi
   
   if [ "$OS_NAME" != "Darwin" ]; then
-    LOCAL_IPv4=`ip add | sed -En 's/127.0.0.1//;s/.*inet (addr:)?(([0-9]*\.){3}[0-9]*).*/\2/p'`
+    LOCAL_IPv4=`ip a | awk '/inet / && !/127.0.0.1/ && !/docker0/ {print $2}' | cut -d/ -f1`
     HOST_NAME=`cat /proc/sys/kernel/hostname`
     HOST_LINE="$LOCAL_IPv4 $HOST_NAME"
 

@@ -20,15 +20,18 @@ public interface IWebRTCClient {
 	 * Send video packet to connected client
 	 * @param videoPacket
 	 * @param isKeyFrame
+	 * @param timestamp
+	 * @param frameRotation
 	 * @param naluIndices 
-	 * @param trackIndex 
+	 * @param trackId
 	 */
 	public void sendVideoPacket(ByteBuffer videoPacket, boolean isKeyFrame, long timestamp, int frameRotation, List<NaluIndex> naluIndices, String trackId);
 	
 	/**
 	 * Send audio packet to connected client
 	 * @param audioPacket
-	 * @param audioLevel 
+	 * @param timestamp
+	 * @param trackId
 	 */
 	public void sendAudioPacket(ByteBuffer audioPacket, long timestamp, String trackId);
 	
@@ -165,13 +168,17 @@ public interface IWebRTCClient {
 	 * @return stream resolution forced value
 	 * If it's automatic, it returns 0
 	 */
-	public int getForceStreamHeight();
+	public int getForceStreamHeight(String streamId);
 	
 	/**
 	 * 
-	 * @return stream resolution current value
+	 * @param streamHeight the resolution height to be forced to send 
+	 * 
+     * @param subtrackId the subtrack id to be forced to send. If it's null or empty, it just replaces main streamId
+	 * 
+	 * @return true if it's successful, false if it's not changed
 	 */
-	public void forceStreamQuality(int streamHeight);
+	public boolean forceStreamQuality(int streamHeight, String subtrackId);
 
 	/**
 	 * 
@@ -195,15 +202,21 @@ public interface IWebRTCClient {
 	/**
 	 * Client stream resolution change notification
 	 * @param streamHeight
+	 * @param streamId is may be the main streamId or subtrackId
 	 */
-	public void notifyWebRTCClientAboutChangeInResolution(int streamHeight);
+	public void notifyWebRTCClientAboutChangeInResolution(int streamHeight, String streamId);
 	
 	/**
 	 * Getter for stream Id
 	 * @return
 	 */
 	public String getStreamId();
+
+	/**
+	 * Getter for remote ip address
+	 * @return
+	 */
+	public String getRemoteIpAddress();
 	
-
-
+	
 }

@@ -1,0 +1,113 @@
+name: 'Build Projects'
+description: 'Clone and Build directly dependent projects to package Ant Media Server'
+inputs:
+  branch_name:  
+    description: 'build branch name'
+    required: true
+    default: 'master'
+
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Clone and build Ant Media Server Parent project
+      shell: bash
+      run: |
+          BRANCH="${{ inputs.branch_name }}"
+          echo "Building dependent projects for branch: ${BRANCH}"
+          if ! git clone --depth=1 -b "${BRANCH}" https://github.com/ant-media/ant-media-server-parent.git; then
+            echo "::warning::Branch '${BRANCH}' not found in ant-media-server-parent; falling back to master"
+            git clone --depth=1 https://github.com/ant-media/ant-media-server-parent.git
+          fi
+          cd ant-media-server-parent
+          echo "Parent pom netty.version=$(grep -m1 '<netty.version>' pom.xml | sed 's/.*>\(.*\)<.*/\1/')"
+          mvn clean install -DskipTests -Dmaven.javadoc.skip=true -Dgpg.skip=true --quiet
+          cd ..
+     
+    - name: Build Ant Media Server project #let the dependencies be resolved
+      shell: bash
+      run: mvn clean install -Dmaven.javadoc.skip=true -Dmaven.test.skip=true -Dgpg.skip=true --quiet
+    
+    - name: Clone and build StreamApp project
+      shell: bash
+      run: |
+          git clone --depth=1 -b ${{ inputs.branch_name }} https://github.com/ant-media/StreamApp.git || git clone --depth=1 https://github.com/ant-media/StreamApp.git
+          cd StreamApp
+          npm install
+          npm run compile
+          cd embedded-player
+          npm install
+          npm run compile
+          npm run deploy
+          cd ..
+          mvn clean install -DskipTests -Dmaven.javadoc.skip=true -Dgpg.skip=true -B -V --quiet
+          cd ..
+
+    - name: Fetch web panel
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BRANCH: ${{ inputs.branch_name }}
+        REF_TYPE: ${{ github.ref_type }}
+      run: |
+          # Puts the web panel (legacy console + reborn) into webapps/root by downloading a
+          # prebuilt zip from the panel repo's releases. Which zip depends on what is building:
+          #   tag ams-vX.Y.Z -> the published panel release with the same tag, else FAIL the build
+          #   master         -> panel-master.zip from the WORK-BRANCHES pre-release
+          #   other branch   -> same-name branch snapshot build if fresh and exists,
+          #                     if not fresh, trigger a new build. If no branch available or the
+          #                     build fails, take latest master snapshot.
+          # version.json in panel zip is a CI-only staleness stamp, always excluded from extraction.
+
+          PANEL="ant-media/management-panel-reborn"
+          slug="$(printf '%s' "$BRANCH" | sed 's/[^A-Za-z0-9._-]/-/g')"
+          dl() { gh release download "$1" -R "$PANEL" --pattern "$2" --dir /tmp --clobber; }
+          dl_master() {
+            dl WORK-BRANCHES "panel-master.zip" \
+              || { echo "::error::panel-master.zip missing from WORK-BRANCHES at $PANEL."; exit 1; }
+            zip="/tmp/panel-master.zip"
+          }
+          build_local() {
+            echo "Building panel locally from branch '$BRANCH'."
+            rm -rf /tmp/panel-src
+            git clone --depth=1 -b "$BRANCH" "https://github.com/$PANEL.git" /tmp/panel-src \
+              && (corepack enable 2>/dev/null || sudo corepack enable) \
+              && (cd /tmp/panel-src && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 PANEL_CHANNEL=SNAPSHOT OUT_ZIP="/tmp/panel-$slug.zip" ./release.sh --with-legacy)
+          }
+
+          if [[ "$REF_TYPE" == "tag" && "$BRANCH" == ams-v* ]]; then
+            ver="${BRANCH#ams-v}"
+            dl "$BRANCH" "panel-release-$ver.zip" \
+              || { echo "::error::Panel release '$BRANCH' not published at $PANEL. Run the panel Release workflow with AMS version $ver, publish the draft, then re-run this build."; exit 1; }
+            zip="/tmp/panel-release-$ver.zip"
+            echo "::notice::Web panel: release $BRANCH (panel-release-$ver.zip)"
+          elif [ "$BRANCH" = "master" ]; then
+            dl_master
+            echo "::notice::Web panel: master snapshot (panel-master.zip)"
+          else
+            head="$(git ls-remote "https://github.com/$PANEL" "refs/heads/$BRANCH" | cut -f1 || true)"
+            if [ -z "$head" ]; then
+              dl_master
+              echo "::notice::Web panel: no panel branch '$BRANCH'; using panel-master.zip"
+            elif dl WORK-BRANCHES "panel-$slug.zip" \
+                 && [ "$(unzip -p "/tmp/panel-$slug.zip" version.json | jq -r .commit)" = "$head" ]; then
+              zip="/tmp/panel-$slug.zip"
+              echo "::notice::Web panel: branch snapshot panel-$slug.zip (commit ${head:0:7})"
+            elif build_local; then
+              zip="/tmp/panel-$slug.zip"
+              echo "::notice::Web panel: built locally from panel branch $BRANCH (${head:0:7})"
+            else
+              echo "::warning::Web panel: local build for '$BRANCH' failed; using panel-master.zip"
+              dl_master
+            fi
+          fi
+
+          unzip -o -q "$zip" -x version.json -d src/main/server/webapps/root/
+                  
+ 
+    - name: Replace ffmpeg builds
+      shell: bash
+      run: |
+           wget -O ~/.m2/repository/org/bytedeco/ffmpeg/7.1-1.5.11/ffmpeg-7.1-1.5.11-linux-x86_64.jar https://storage.sbg.cloud.ovh.net/v1/AUTH_8cb28f9bc6ee43f0a3a1825efbb4311e/test-storage/ffmpeg-7.1-1.5.11-linux-x86_64.jar
+           wget -O ~/.m2/repository/org/bytedeco/ffmpeg/7.1-1.5.11/ffmpeg-7.1-1.5.11-linux-arm64.jar https://storage.sbg.cloud.ovh.net/v1/AUTH_8cb28f9bc6ee43f0a3a1825efbb4311e/test-storage/ffmpeg-7.1-1.5.11-linux-arm64.jar
